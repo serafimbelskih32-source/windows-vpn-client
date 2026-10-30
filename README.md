@@ -4,7 +4,7 @@
 
 ![Окно программы](docs/screenshot.png)
 
-**[Скачать FimaVPN.exe](https://github.com/OWNER/REPO/releases/latest/download/FimaVPN.exe)** (Windows 10 и 11, 64 бита, около 30 МБ). Устанавливать ничего не нужно: скачал и запустил.
+**[Скачать FimaVPN.exe](https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN.exe)** (Windows 10 и 11, 64 бита, около 30 МБ). Устанавливать ничего не нужно: скачал и запустил.
 
 ## Как начать
 
@@ -44,8 +44,8 @@
 Нужен Python 3.12+ с tkinter (установщик с python.org).
 
 ```powershell
-git clone https://github.com/OWNER/REPO.git
-cd REPO
+git clone https://github.com/serafimbelskih32-source/windows-vpn-client.git
+cd windows-vpn-client
 .\build.ps1
 ```
 
