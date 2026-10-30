@@ -143,5 +143,23 @@ else:
 # apply_staged does nothing when not packaged
 check("apply_staged is a no-op from source", updater.apply_staged({"path": "x"}, False) is False)
 
+# The new copy is started from the old one: it must not inherit the old copy's unpacked folder (a PyInstaller one-file
+# program deletes it on exit, and the new copy died with "Failed to load Python DLL").
+os.environ["_MEIPASS2"] = os.environ["_PYI_APPLICATION_HOME_DIR"] = os.path.join(tempfile.gettempdir(), "_MEI_gone")
+env = updater.fresh_env()
+check("fresh_env drops the old copy's unpacked-folder variables", not any(k in env for k in updater._PYI_VARS), sorted(env))
+check("... asks the bootloader for a fresh start", env.get("PYINSTALLER_RESET_ENVIRONMENT") == "1")
+check("... and keeps the rest of the environment", env.get("PATH") == os.environ.get("PATH"))
+seen = {}
+real_popen = subprocess.Popen
+subprocess.Popen = lambda *a, **k: seen.update(k)
+try:
+    updater.apply_windows("new.exe", "app.exe", [1], True)
+finally:
+    subprocess.Popen = real_popen
+check("the Windows swap helper starts with that environment", seen.get("env") == env, seen.get("env", {}).keys())
+for k in updater._PYI_VARS:
+    os.environ.pop(k, None)
+
 print("\nFAILED:" if fails else "\nALL PASSED", fails if fails else "")
 sys.exit(1 if fails else 0)

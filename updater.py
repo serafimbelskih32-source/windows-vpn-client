@@ -159,6 +159,19 @@ def discard(dest_dir):
 
 
 # ----- swapping the new program in -----
+# A PyInstaller one-file program passes its unpacked folder to everything it starts through these variables.
+_PYI_VARS = ("_MEIPASS2", "_PYI_APPLICATION_HOME_DIR", "_PYI_ARCHIVE_FILE", "_PYI_PARENT_PROCESS_LEVEL", "_PYI_SPLASH_IPC")
+
+
+def fresh_env():
+    """Environment for starting the new copy of this program from the running one. Without this the new copy
+    inherits the old one's unpacked folder, which the old one deletes when it exits, and dies at once with
+    "Failed to load Python DLL". With the variables dropped and a fresh start requested it unpacks itself."""
+    env = {k: v for k, v in os.environ.items() if k not in _PYI_VARS}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
+
+
 def _ps_quote(p):
     return "'" + p.replace("'", "''") + "'"
 
@@ -175,7 +188,7 @@ def apply_windows(src, dst, pids, relaunch):
     # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW. (DETACHED_PROCESS would make powershell exit silently.)
     flags = 0x00000200 | 0x08000000
     subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
-                      "-Command", script], creationflags=flags, close_fds=True)
+                      "-Command", script], creationflags=flags, close_fds=True, env=fresh_env())
 
 
 def apply_linux(src, dst, relaunch):
@@ -186,7 +199,7 @@ def apply_linux(src, dst, relaunch):
     os.replace(tmp, dst)
     os.remove(src)
     if relaunch:
-        os.execv(dst, [dst])
+        os.execve(dst, [dst], fresh_env())
 
 
 def apply_macos(src_zip, bundle, relaunch, pids):
@@ -202,7 +215,8 @@ def apply_macos(src_zip, bundle, relaunch, pids):
     q = lambda p: "'" + p.replace("'", "'\\''") + "'"  # noqa: E731
     wait = "".join(f"while kill -0 {p} 2>/dev/null; do sleep 0.5; done; " for p in pids)
     script = f"{wait}rm -rf {q(bundle)} && mv {q(new)} {q(bundle)} && rm -f {q(src_zip)}" + (f"; open {q(bundle)}" if relaunch else "")
-    subprocess.Popen(["/bin/sh", "-c", script], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.Popen(["/bin/sh", "-c", script], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     env=fresh_env())
 
 
 def apply_staged(info, relaunch, exe=None, pids=None):
