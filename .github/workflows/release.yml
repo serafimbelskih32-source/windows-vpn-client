@@ -66,14 +66,15 @@ jobs:
           fi
           ls -la core
 
-      - name: Icons
-        run: pip install pillow && python make_icon.py
+      - name: Python packages and icons
+        run: pip install pillow pystray && python make_icon.py
 
       - name: Tests
         shell: bash
         run: |
           python tests/test_updater.py
           python tests/test_flags.py
+          python tests/test_tray.py
           python tests/test_supervisor.py
           python vpn.py --selftest < tests/sample_links.txt
           if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python tests/gui_smoke.py; else python tests/gui_smoke.py; fi
@@ -85,16 +86,17 @@ jobs:
           pip install pyinstaller==6.22.3
           if [ "$RUNNER_OS" = "Windows" ]; then
             pyinstaller --noconfirm --onefile --windowed --uac-admin --name FimaVPN --icon icon.ico \
-              --add-data "core;core" --add-data "icon.ico;." vpn.py
+              --collect-submodules pystray --add-data "core;core" --add-data "icon.ico;." --add-data "icon.png;." vpn.py
           elif [ "$RUNNER_OS" = "macOS" ]; then
             pyinstaller --noconfirm --windowed --name FimaVPN --icon icon.icns \
-              --add-data "core:core" --add-data "icon.png:." vpn.py
+              --collect-submodules pystray --add-data "core:core" --add-data "icon.png:." vpn.py
             # ad-hoc signature: Apple Silicon refuses to run unsigned code
             find dist/FimaVPN.app -name sing-box -type f -exec codesign --force -s - {} \;
             codesign --force --deep -s - dist/FimaVPN.app
             ditto -c -k --sequesterRsrc --keepParent dist/FimaVPN.app "dist/${{ matrix.asset }}"
           else
-            pyinstaller --noconfirm --onefile --name FimaVPN --add-data "core:core" --add-data "icon.png:." vpn.py
+            pyinstaller --noconfirm --onefile --name FimaVPN --collect-submodules pystray \
+              --add-data "core:core" --add-data "icon.png:." vpn.py
             mv dist/FimaVPN "dist/${{ matrix.asset }}"
           fi
           ls -la dist
@@ -104,8 +106,10 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
             xvfb-run -a "dist/${{ matrix.asset }}" --selftest < tests/sample_links.txt
+            xvfb-run -a "dist/${{ matrix.asset }}" --tray-selftest | tee /dev/stderr | grep -q "^ok"
           elif [ "$RUNNER_OS" = "macOS" ]; then
             dist/FimaVPN.app/Contents/MacOS/FimaVPN --selftest < tests/sample_links.txt
+            dist/FimaVPN.app/Contents/MacOS/FimaVPN --tray-selftest | tee /dev/stderr | grep -q "^ok"
             find dist/FimaVPN.app -name sing-box -type f -exec ls -la {} \;
           else
             ls -la "dist/${{ matrix.asset }}"

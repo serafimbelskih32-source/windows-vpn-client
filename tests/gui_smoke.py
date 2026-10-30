@@ -3,6 +3,8 @@ import os
 import sys
 import traceback
 
+os.environ["FIMA_NO_TRAY"] = "1"  # the real tray is checked separately; a CI desktop has none
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 try:
     import vpn

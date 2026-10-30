@@ -26,6 +26,7 @@ from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 import http.client
 
 import flags
+import tray
 import updater
 
 AUTO_LABEL = "Быстрейший из списка"
@@ -48,6 +49,7 @@ def data_dir():
 
 DATA = data_dir()
 STOPFILE = os.path.join(DATA, "stop")  # Linux/macOS: the root supervisor stops the core when this file appears
+INSTANCE_FILE = os.path.join(DATA, "instance.port")  # loopback port of the running copy, so a 2nd launch can reach it
 UPDATE_DIR = os.path.join(DATA, "update")  # a downloaded, verified update waits here for the next start
 SETTINGS = os.path.join(DATA, "settings.json")
 RUNCFG = os.path.join(DATA, "run.json")
@@ -577,13 +579,14 @@ def enable_clipboard(w):
 
 
 class Flat(tk.Label):
-    """Hard-edged text button: ink outline, inverts on hover and keyboard focus."""
-    def __init__(self, master, text, command, font):
-        super().__init__(master, text=text, font=font, bg=PAPER, fg=INK, padx=P(12), pady=P(4), cursor="hand2",
+    """Hard-edged text button: ink outline, inverts on hover and keyboard focus. `primary` = the default action (blue)."""
+    def __init__(self, master, text, command, font, primary=False):
+        rest_bg, rest_fg = (BLUE, WHITE) if primary else (PAPER, INK)
+        super().__init__(master, text=text, font=font, bg=rest_bg, fg=rest_fg, padx=P(12), pady=P(4), cursor="hand2",
                          highlightthickness=P(2), highlightbackground=INK, highlightcolor=INK, takefocus=1)
         self.command = command
-        for ev, bg, fg in (("<Enter>", INK, PAPER), ("<Leave>", PAPER, INK),
-                           ("<FocusIn>", INK, PAPER), ("<FocusOut>", PAPER, INK)):
+        for ev, bg, fg in (("<Enter>", INK, PAPER), ("<Leave>", rest_bg, rest_fg),
+                           ("<FocusIn>", INK, PAPER), ("<FocusOut>", rest_bg, rest_fg)):
             self.bind(ev, lambda e, bg=bg, fg=fg: self.config(bg=bg, fg=fg))
         self.bind("<Button-1>", lambda e: self.command())
         self.bind("<space>", lambda e: self.command())
@@ -611,6 +614,83 @@ class Check(tk.Frame):
     def paint(self):
         on = self.var.get()
         self.box.config(text="✓" if on else "", bg=BLUE if on else PAPER, fg=WHITE)
+
+
+def ui_family(widget):
+    fams = set(tkfont.families(widget))
+    return next((f for f in UI_FONTS if f in fams), UI_FONTS[-1])
+
+
+class Dialog(tk.Toplevel):
+    """A message box in the app's style. The system one looks like any other Windows dialog.
+    A stripe on the left says what kind of message it is: blue = information or a question, red = an error.
+    Enter = the default (blue) button, Esc = cancel. Blocks until closed; `result` is the index of the button."""
+    def __init__(self, parent, text, buttons, kind="info", default=0, cancel=None, title=TITLE):
+        super().__init__(parent)
+        self.result = None
+        self.withdraw()
+        self.title(title)
+        self.resizable(False, False)
+        self.configure(bg=INK)  # the 3 px ink frame is this background showing around the body
+        try:
+            if IS_WIN:
+                self.iconbitmap(os.path.join(BASE, "icon.ico"))
+        except Exception:  # noqa: BLE001
+            pass
+        fam = ui_family(self)
+        body = tk.Frame(self, bg=BG)
+        body.pack(padx=P(3), pady=P(3))
+        tk.Frame(body, bg=RED if kind == "error" else BLUE, width=P(10)).pack(side="left", fill="y")
+        inner = tk.Frame(body, bg=BG)
+        inner.pack(side="left", padx=P(22), pady=P(20))
+        tk.Label(inner, text=text, font=(fam, FZ(11)), bg=BG, fg=INK, justify="left", anchor="w",
+                 wraplength=P(400)).pack(fill="x", pady=(0, P(18)))
+        row = tk.Frame(inner, bg=BG)
+        row.pack(anchor="e")
+        self.buttons = []
+        for i, label in enumerate(buttons):
+            b = Flat(row, label, lambda i=i: self.done(i), (fam, FZ(11)), primary=(i == default))
+            b.pack(side="left", padx=(P(10), 0))
+            self.buttons.append(b)
+        self.bind("<Escape>", lambda e: self.done(cancel))
+        self.bind("<Return>", lambda e: self.done(default))
+        self.protocol("WM_DELETE_WINDOW", lambda: self.done(cancel))
+        self.update_idletasks()
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        try:
+            shown = bool(parent.winfo_viewable())
+        except tk.TclError:
+            shown = False
+        if shown:  # centred over the window it belongs to
+            x = parent.winfo_rootx() + (parent.winfo_width() - w) // 2
+            y = parent.winfo_rooty() + (parent.winfo_height() - h) // 3
+            self.transient(parent)
+        else:  # parent hidden (tray) or not there yet: centre on the screen
+            x, y = (self.winfo_screenwidth() - w) // 2, (self.winfo_screenheight() - h) // 3
+        self.geometry(f"+{max(0, x)}+{max(0, y)}")
+        self.deiconify()
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+        self.focus_force()  # Enter / Esc work without focusing a button, which would invert its colours
+        self.wait_window(self)
+
+    def done(self, i):
+        self.result = i
+        self.destroy()
+
+
+def show_info(parent, text):
+    Dialog(parent, text, ["OK"], "info", 0, 0)
+
+
+def show_error(parent, text):
+    Dialog(parent, text, ["OK"], "error", 0, 0)
+
+
+def ask_yes_no(parent, text, yes="Да", no="Нет"):
+    return Dialog(parent, text, [yes, no], "question", 0, 1).result == 0
 
 
 class FlagImages:
@@ -1007,7 +1087,10 @@ class App(tk.Tk):
         S = max(1.0, float(self.tk.call("tk", "scaling")) / 1.3333)
         def on_error(*a):
             log_crash(*a)
-            messagebox.showerror(TITLE, "Ошибка: " + str(a[1]) + "\nПодробности: %APPDATA%\\FimaVPN\\crash.log")
+            try:
+                show_error(self, "Ошибка: " + str(a[1]) + "\nПодробности: " + os.path.join(DATA, "crash.log"))
+            except Exception:  # noqa: BLE001
+                pass
         self.report_callback_exception = on_error
         self.title(TITLE)
         try:
@@ -1030,6 +1113,7 @@ class App(tk.Tk):
         self.testing = False
         self.test_stop = threading.Event()
         self.results = {}
+        self.alive = {}  # tag -> True/False: did the server answer in the last test (kept even if ping is hidden)
         self.outs = []
         self.subs = {}  # url -> last good fetch {"outs", "info", "time", "ua"}; cached on disk
         self.sub_fail = {}  # url -> time of the last failed fetch
@@ -1043,6 +1127,12 @@ class App(tk.Tk):
         self.t_conn = 0.0  # when the last connect started
         self.uiq = queue.Queue()  # callables from worker threads, run by pump() on the Tk thread
         self.flagimgs = FlagImages(self)
+        self.quitting = False
+        self.tray, self.tray_ok = None, False
+        if not os.environ.get("FIMA_NO_TRAY"):  # tests and screenshots must not put icons on the real desktop
+            self.tray = tray.Tray(os.path.join(BASE, "icon.png"), self._ui, self.show_window, self.toggle_from_tray,
+                                  self.quit_app)
+            self.tray_ok = self.tray.start()
         self._pick = None  # row the app selected itself (see on_select)
         self._pump_id = self._tick_id = None
         self.state = "off"
@@ -1054,7 +1144,9 @@ class App(tk.Tk):
         self.pending = None  # a verified update that is downloaded and waiting to be installed
         self.upd_busy = False
         self.cfg = {"sources": "", "chosen": "AUTO", "ru_direct": True, "extra": "", "rules_ok": 0, "rules_try": 0,
-                    "auto_update": None}  # None = not asked yet
+                    "auto_update": None,  # None = not asked yet
+                    "show_flags": True, "show_ping": True, "show_speed": True,
+                    "tray_on_close": True, "tray_hint_shown": False}
         try:
             self.cfg.update(json.load(open(SETTINGS, encoding="utf-8-sig")))
         except Exception:
@@ -1078,6 +1170,7 @@ class App(tk.Tk):
         # rows are flag + name: drop the expander arrow's empty space on the left
         st.layout("T.Treeview.Item", [("Treeitem.padding", {"sticky": "nswe", "children": [
             ("Treeitem.image", {"side": "left", "sticky": ""}), ("Treeitem.text", {"side": "left", "sticky": ""})]})])
+        st.configure("T.Treeview.Item", padding=(P(8), 0, P(8), 0))  # breathing room: with no flags the name touched the edge
         st.layout("Flat.Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {
             "children": [("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})], "sticky": "ns"})])
         st.configure("Flat.Vertical.TScrollbar", background=INK, troughcolor=PAPER, borderwidth=0, width=P(10))
@@ -1115,6 +1208,7 @@ class App(tk.Tk):
         sb.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.tag_configure("live", foreground=BLUE, font=(fam, FZ(11), "bold"))
+        self.tree.bind("<Configure>", self.fit_tree_columns, add="+")
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind("<Double-1>", lambda e: self.toggle() if self.state == "off" else None)
 
@@ -1149,28 +1243,47 @@ class App(tk.Tk):
 
         # log (folded)
         self.log_open = False
-        self.log_head = tk.Label(root, text="▸ Лог", font=self.f_h, bg=BG, fg=INK, cursor="hand2", anchor="w")
-        self.log_head.pack(fill="x", pady=(P(16), P(4)))
-        self.log_head.bind("<Button-1>", lambda e: self.toggle_log())
         self.log_box = tk.Frame(root, bg=INK, padx=P(2), pady=P(2))
         self.log = tk.Text(self.log_box, height=8, state="disabled", bg=INK, fg="#C9CED6", font=(MONO, FZ(9)),
                            relief="flat", bd=0, highlightthickness=0, selectbackground=BLUE, padx=P(6), pady=P(5))
         self.log.pack(fill="both", expand=True)
 
-        # program updates
-        urow = tk.Frame(root, bg=BG)
-        urow.pack(fill="x", pady=(P(14), 0))
+        # settings (folded): what the list shows and the test measures, program updates
+        self.set_open = False
+        self.set_box = tk.Frame(root, bg=BG)
+        self.v_flags = tk.BooleanVar(value=bool(self.cfg.get("show_flags", True)))
+        self.v_ping = tk.BooleanVar(value=bool(self.cfg.get("show_ping", True)))
+        self.v_speed = tk.BooleanVar(value=bool(self.cfg.get("show_speed", True)))
+        for text, var in (("Флаги стран", self.v_flags), ("Пинг: показывать и измерять", self.v_ping),
+                          ("Скорость: показывать и измерять", self.v_speed)):
+            Check(self.set_box, text, var, self.f_b).pack(anchor="w", pady=(0, P(2)))
+            var.trace_add("write", self.on_view_toggle)
+        self.v_tray = tk.BooleanVar(value=bool(self.cfg.get("tray_on_close", True)))
+        if self.tray_ok:
+            Check(self.set_box, "Закрытие окна сворачивает в трей", self.v_tray, self.f_b).pack(anchor="w", pady=(0, P(2)))
+            self.v_tray.trace_add("write", lambda *a: (self.cfg.update(tray_on_close=self.v_tray.get()),
+                                                       self.save(sources=False)))
+        urow = tk.Frame(self.set_box, bg=BG)
+        urow.pack(fill="x", pady=(P(8), 0))
         self.upd_var = tk.BooleanVar(value=bool(self.cfg.get("auto_update")))
         Check(urow, "Обновлять программу автоматически", self.upd_var, self.f_s).pack(side="left")
         self.upd_btn = Flat(urow, "Проверить", self.on_upd_click, self.f_s)
         self.upd_btn.pack(side="right")
-        tk.Label(urow, text=f"v{updater.VERSION}", font=self.f_s, bg=BG, fg=MUTE).pack(side="right", padx=(0, P(10)))
         self.upd_var.trace_add("write", self.on_upd_toggle)
+
+        # footer: deliberately quiet. Small grey links; the version on the right.
+        self.foot = tk.Frame(root, bg=BG)
+        self.foot.pack(fill="x", pady=(P(14), 0))
+        self.log_head = self.quiet_link(self.foot, "Лог", self.toggle_log)
+        self.log_head.pack(side="left")
+        self.set_head = self.quiet_link(self.foot, "Настройки", self.toggle_settings)
+        self.set_head.pack(side="left", padx=(P(16), 0))
+        tk.Label(self.foot, text=f"v{updater.VERSION}", font=self.f_s, bg=BG, fg=MUTE).pack(side="right")
 
         for w in (self.src, self.extra, self.log):
             enable_clipboard(w)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.refresh_power()
+        self.apply_view()
         self.show_cached()
         self.clean_done = threading.Event()
 
@@ -1183,6 +1296,7 @@ class App(tk.Tk):
                 self.clean_done.set()
         threading.Thread(target=clean, daemon=True).start()
         self._pump_id = self.after(50, self.pump)
+        self.start_instance_server()
         self.after(300, self.refresh_due)
         self._tick_id = self.after(500, self.tick)
         self.after(1500, self.update_startup)
@@ -1196,8 +1310,7 @@ class App(tk.Tk):
         if not self.frozen():
             return  # running from source: there is no program file to replace
         if self.cfg.get("auto_update") is None:
-            yes = messagebox.askyesno(
-                TITLE, "Обновлять программу автоматически?\n\n"
+            yes = ask_yes_no(self, "Обновлять программу автоматически?\n\n"
                        "Когда на GitHub выйдет новая версия, программа скачает её, проверит контрольную сумму и "
                        "установит при следующем запуске. Ничего о тебе не отправляется.\n\n"
                        "Это можно включить и выключить внизу окна.")
@@ -1250,14 +1363,14 @@ class App(tk.Tk):
         self.pending = got
         self.upd_btn.config(text=f"Установить {upd['version']}")
         if manual:
-            if messagebox.askyesno(TITLE, f"Версия {upd['version']} скачана и проверена.\nУстановить сейчас? "
+            if ask_yes_no(self, f"Версия {upd['version']} скачана и проверена.\nУстановить сейчас? "
                                           "Программа перезапустится."):
                 return self.install_now()
         self.say(f"Версия {upd['version']} скачана. " + ("Установится при следующем запуске."
                                                          if self.cfg.get("auto_update") else "Нажми «Установить»."))
 
     def install_now(self):
-        if self.state != "off" and not messagebox.askyesno(TITLE, "VPN отключится на время обновления. Продолжить?"):
+        if self.state != "off" and not ask_yes_no(self, "VPN отключится на время обновления. Продолжить?"):
             return
         self.save()
         self.test_stop.set()
@@ -1274,14 +1387,83 @@ class App(tk.Tk):
         tk.Label(row, text=title, font=self.f_h, bg=BG, fg=INK).pack(side="left")
         return row
 
+    def quiet_link(self, parent, text, command):
+        """A small grey text link: dark and underlined only while hovered or while its panel is open."""
+        base, lit = (self.fam, FZ(10)), (self.fam, FZ(10), "underline")
+        lbl = tk.Label(parent, text=text, font=base, bg=BG, fg=MUTE, cursor="hand2")
+        lbl.base, lbl.lit, lbl.open = base, lit, False
+
+        def paint(hover):
+            on = hover or lbl.open
+            lbl.config(fg=INK if on else MUTE, font=lit if on else base)
+        lbl.paint = paint
+        lbl.bind("<Enter>", lambda e: paint(True))
+        lbl.bind("<Leave>", lambda e: paint(False))
+        lbl.bind("<Button-1>", lambda e: command())
+        return lbl
+
     def toggle_log(self, force=None):
         self.log_open = (not self.log_open) if force is None else force
-        self.log_head.config(text=("▾ Лог" if self.log_open else "▸ Лог"))
+        self.log_head.open = self.log_open
+        self.log_head.paint(False)
         if self.log_open:
-            self.log_box.pack(fill="x", after=self.log_head)  # keep it above the update row
-            self.geometry("")
+            self.log_box.pack(fill="x", before=self.foot)  # panels open above the footer, which never moves
         else:
             self.log_box.pack_forget()
+        self.fit_height()
+
+    def fit_height(self):
+        """Resize to what the content needs, keeping the width (geometry("") would also reset the width to the widest
+        child's natural request: the 80-character text fields make that wider than the window)."""
+        self.update_idletasks()
+        w = self.winfo_width()
+        self.geometry(f"{w if w > 100 else P(480)}x{max(self.winfo_reqheight(), P(760))}")
+
+    def toggle_settings(self, force=None):
+        self.set_open = (not self.set_open) if force is None else force
+        self.set_head.open = self.set_open
+        self.set_head.paint(False)
+        if self.set_open:
+            self.set_box.pack(fill="x", before=self.foot)
+        else:
+            self.set_box.pack_forget()
+        self.fit_height()
+
+    def on_view_toggle(self, *a):
+        self.cfg.update(show_flags=self.v_flags.get(), show_ping=self.v_ping.get(), show_speed=self.v_speed.get())
+        self.save(sources=False)
+        self.apply_view()
+
+    def apply_view(self):
+        """Flags, the ping column and the speed column are independent. Hidden = not shown AND not measured."""
+        cols = [c for c, on in (("ping", self.v_ping.get()), ("speed", self.v_speed.get()), ("proto", True)) if on]
+        self.tree.configure(displaycolumns=cols)
+        for iid in self.tree.get_children():
+            img = self.flagimgs.get("AUTO") if iid == "auto" else self.flagimgs.get(self.flag_code(self.outs[int(iid)]))
+            self.tree.item(iid, image=img if self.v_flags.get() else "")
+        if not self.testing:
+            self.test_btn.config(text=self.test_label())
+        self.after_idle(self.fit_tree_columns)
+        self.refresh_power()
+
+    def fit_tree_columns(self, e=None):
+        """The name column takes whatever width the visible columns leave. ttk re-stretches only when the widget is
+        resized, not when columns are hidden, which left the selection bar ending halfway across the list."""
+        total = self.tree.winfo_width()
+        if total < 50:
+            return
+        other = sum(int(self.tree.column(c, "width")) for c in self.tree.cget("displaycolumns")
+                    if c in ("ping", "speed", "proto"))
+        want = max(P(120), total - other - P(4))
+        if abs(int(self.tree.column("#0", "width")) - want) > 2:
+            self.tree.column("#0", width=want)
+
+    def test_label(self):
+        if self.v_speed.get():
+            return "Тест скорости"
+        if self.v_ping.get():
+            return "Тест пинга"
+        return "Определить страны" if self.v_flags.get() else "Тест"
 
     def say(self, text, err=False):
         self.status.config(text=text, fg=RED if err else MUTE)
@@ -1316,7 +1498,7 @@ class App(tk.Tk):
         o = self.outs[i]
         self.exit_cc[okey(o)] = cc
         if self.tree.exists(str(i)):
-            self.tree.item(str(i), image=self.flagimgs.get(self.flag_code(o)))
+            self.tree.item(str(i), image=self.flagimgs.get(self.flag_code(o)) if self.v_flags.get() else "")
         if self.state != "off":
             self.refresh_power()
 
@@ -1336,7 +1518,7 @@ class App(tk.Tk):
             name, flag = flags.strip_flag(label), self.flag_for_tag(label)
         else:
             name, flag = "", None
-        self.power.set(self.state, name, clock, self.blink, flag)
+        self.power.set(self.state, name, clock, self.blink, flag if self.v_flags.get() else None)
 
     def save(self, sources=True):
         """Persist settings. Background jobs pass sources=False so a half-edited sources box is not committed."""
@@ -1353,7 +1535,7 @@ class App(tk.Tk):
         try:
             txt = self.clipboard_get()
         except tk.TclError:
-            return messagebox.showinfo(TITLE, "Буфер обмена пуст.")
+            return show_info(self, "Буфер обмена пуст.")
         cur = self.src.get("1.0", "end").strip()
         self.src.delete("1.0", "end")
         self.src.insert("1.0", (cur + "\n" if cur else "") + txt.strip())
@@ -1433,17 +1615,18 @@ class App(tk.Tk):
             self.count.config(text="Пусто")
             self.say("Серверов нет. Проверь ссылку или ключ.", err=True)
             if manual and not silent:
-                messagebox.showerror(TITLE, "Не удалось получить серверы.\n" +
+                show_error(self, "Не удалось получить серверы.\n" +
                                      ("\n".join(errors) if errors else "Проверь ссылку или ключ."))
             return
         if manual:
             self.say("Не все подписки обновились, показаны сохранённые серверы." if errors else "", err=bool(errors))
         if len(outs) > 1:
-            self.tree.insert("", "end", iid="auto", text=AUTO_LABEL, image=self.flagimgs.get("AUTO"),
+            self.tree.insert("", "end", iid="auto", text=AUTO_LABEL, image=self.flagimgs.get("AUTO") if self.v_flags.get() else "",
                              values=("", "", "AUTO"))
         for i, o in enumerate(outs):
             ping, speed = self.results.get(o["tag"], (None, None))
-            self.tree.insert("", "end", iid=str(i), text=flags.strip_flag(o["tag"]), image=self.flagimgs.get(self.flag_code(o)),
+            self.tree.insert("", "end", iid=str(i), text=flags.strip_flag(o["tag"]),
+                             image=self.flagimgs.get(self.flag_code(o)) if self.v_flags.get() else "",
                              values=(fmt_ping(ping), fmt_speed(speed), PROTO.get(o["type"], o["type"].upper())))
         if self.results:
             self.sort_rows()
@@ -1522,11 +1705,14 @@ class App(tk.Tk):
             return self.test_btn.config(text="Останавливаю…")
         if not self.outs:
             return self.say("Сначала добавь подписку и нажми «Обновить».", err=True)
+        plan = (self.v_flags.get(), self.v_ping.get(), self.v_speed.get())
+        if not any(plan):
+            return self.say("В настройках выключено всё: флаги, пинг и скорость. Включи то, что нужно измерить.", err=True)
         self.testing = True
         self.test_stop.clear()
         self.test_btn.config(text="Остановить")
         self.say("Другой VPN-клиент включён, замеры могут быть неточными." if karing_running() else "")
-        threading.Thread(target=self._test_worker, args=(list(self.outs),), daemon=True).start()
+        threading.Thread(target=self._test_worker, args=(list(self.outs), plan), daemon=True).start()
 
     def _ui(self, fn):
         """Hand fn to the Tk thread. Worker threads must never call Tk themselves."""
@@ -1554,11 +1740,77 @@ class App(tk.Tk):
         self._pick = iid
         self.tree.selection_set(iid)
 
-    def _probe(self, i):
-        """One server of the test: response time, and (if it answered) the country it really exits to."""
+    def is_alive(self, i):
+        tag = self.outs[i]["tag"]
+        a = self.alive.get(tag)
+        if a is not None:
+            return a
+        p = self.results.get(tag, (None, None))[0]
+        return p is not None and p >= 0
+
+    def _probe(self, i, plan):
+        """One server of the test. Only what is switched on is measured: the response time (ping), the real exit
+        country (flags), and, if the ping is off, a bare alive check so a speed test knows whom to try.
+        Returns (ping ms or None, country or None, alive True/False/None)."""
+        flags_on, ping_on, _ = plan
         port = TEST_BASE_PORT + i
-        ms = probe_ping(port)
-        return ms, (probe_exit(port) if ms is not None and not self.test_stop.is_set() else None)
+        ms = probe_ping(port) if ping_on else None
+        alive = (ms is not None) if ping_on else None
+        cc = None
+        if (flags_on or not ping_on) and alive is not False and not self.test_stop.is_set():
+            cc = probe_exit(port)
+            if alive is None:  # the country request doubles as the alive check; a plain request is the fallback
+                alive = cc is not None or probe_ping(port) is not None
+        return ms, cc, alive
+
+    def probed(self, i, ms, cc, alive, plan, done, total):
+        """UI side of one finished server: show what was measured, nothing else."""
+        _, ping_on, speed_on = plan
+        if i < len(self.outs) and alive is not None:
+            self.alive[self.outs[i]["tag"]] = alive
+        if ping_on:
+            self._cell(i, ping=(-1 if ms is None else ms))
+        elif alive is False and speed_on:
+            self._cell(i, speed=-1)  # shown as a dash: nothing to measure on a server that does not answer
+        self.set_exit(i, cc)
+        self.count.config(text=f"{'Пинг' if ping_on else 'Проверка'} {done}/{total}")
+
+    def _probe_all(self, outs, plan):
+        """The measuring itself (the core is already running): servers in parallel, then the speed of the best ones."""
+        _, ping_on, speed_on = plan
+        n = len(outs)
+        alive_i, pings, done = {}, {}, 0
+        with ThreadPoolExecutor(8) as ex:
+            futs = {ex.submit(lambda i=i: (None, None, None) if self.test_stop.is_set() else self._probe(i, plan)): i
+                    for i in range(n)}
+            for f in as_completed(futs):
+                i = futs[f]
+                ms, cc, alive = f.result()
+                done += 1
+                if alive is None and ms is None and self.test_stop.is_set():
+                    continue  # skipped after Stop, leave the row untested
+                alive_i[i], pings[i] = bool(alive), ms
+                self._ui(lambda i=i, ms=ms, cc=cc, alive=alive, d=done: self.probed(i, ms, cc, alive, plan, d, n))
+        if not speed_on or self.test_stop.is_set():
+            return
+        if ping_on:  # the fastest by response time are the likeliest to be fast
+            top = sorted((i for i, ok in alive_i.items() if ok), key=lambda i: pings[i])[:TOP_FOR_SPEED]
+        else:  # no ranking without ping: every server that answered
+            top = sorted(i for i, ok in alive_i.items() if ok)
+        urls = list(SPEED_URLS)  # one source for the whole run so servers are compared on equal terms
+        self.speed_host = ""
+        for k, i in enumerate(top, 1):
+            if self.test_stop.is_set():
+                break
+            self._ui(lambda k=k, t=len(top): self.count.config(text=f"Скорость {k}/{t}"))
+            sp, used = probe_speed(TEST_BASE_PORT + i, urls=urls)
+            if used:
+                urls.remove(used)
+                urls.insert(0, used)
+                self.speed_host = urlsplit(used).hostname or ""
+            if sp is None and self.test_stop.is_set():
+                break
+            self._ui(lambda i=i, sp=(-1 if sp is None else sp): self._cell(i, speed=sp))
 
     def _cell(self, i, ping=None, speed=None):
         tag = self.outs[i]["tag"] if i < len(self.outs) else None
@@ -1571,7 +1823,7 @@ class App(tk.Tk):
             self.tree.set(str(i), "ping", fmt_ping(p))
             self.tree.set(str(i), "speed", fmt_speed(s))
 
-    def _test_worker(self, outs):
+    def _test_worker(self, outs, plan=(True, True, True)):
         err = None
         try:
             # Always measure around any tunnel (ours, a leftover core, Karing...), not through it: sockets are bound
@@ -1603,36 +1855,7 @@ class App(tk.Tk):
                         raise RuntimeError("ядро не отвечает")
                     time.sleep(0.2)
 
-            pings = {}
-            done = 0
-            with ThreadPoolExecutor(8) as ex:
-                futs = {ex.submit(lambda i=i: (None, None) if self.test_stop.is_set() else self._probe(i)): i
-                        for i in range(len(outs))}
-                for f in as_completed(futs):
-                    i = futs[f]
-                    ms, cc = f.result()
-                    done += 1
-                    if ms is None and self.test_stop.is_set():
-                        continue  # skipped after Stop, leave the row untested
-                    pings[i] = ms
-                    shown = -1 if ms is None else ms
-                    self._ui(lambda i=i, shown=shown, cc=cc, d=done: (self._cell(i, ping=shown), self.set_exit(i, cc),
-                                                                      self.count.config(text=f"Пинг {d}/{len(outs)}")))
-            top = sorted((i for i, ms in pings.items() if ms is not None), key=lambda i: pings[i])[:TOP_FOR_SPEED]
-            urls = list(SPEED_URLS)  # one source for the whole run so servers are compared on equal terms
-            self.speed_host = ""
-            for n, i in enumerate(top, 1):
-                if self.test_stop.is_set():
-                    break
-                self._ui(lambda n=n, t=len(top): self.count.config(text=f"Скорость {n}/{t}"))
-                sp, used = probe_speed(TEST_BASE_PORT + i, urls=urls)
-                if used:
-                    urls.remove(used)
-                    urls.insert(0, used)
-                    self.speed_host = urlsplit(used).hostname or ""
-                if sp is None and self.test_stop.is_set():
-                    break
-                self._ui(lambda i=i, sp=(-1 if sp is None else sp): self._cell(i, speed=sp))
+            self._probe_all(outs, plan)
         except Exception as e:
             err = str(e)
         finally:
@@ -1648,49 +1871,64 @@ class App(tk.Tk):
 
     def test_done(self, err):
         self.testing = False
-        self.test_btn.config(text="Тест скорости")
+        self.test_btn.config(text=self.test_label())
         self.count.config(text=str(len(self.outs)))
         if err:
             return self.say("Тест не удался: " + err, err=True)
+        show_flags, show_ping, show_speed = self.v_flags.get(), self.v_ping.get(), self.v_speed.get()
+
         def res(i):
             return self.results.get(self.outs[i]["tag"], (None, None))
 
-        alive = [i for i in range(len(self.outs)) if res(i)[0] is not None and res(i)[0] >= 0]
+        alive = [i for i in range(len(self.outs)) if self.is_alive(i)]
         if not alive:
-            return self.say("Ни один сервер не ответил." if any(res(i)[0] is not None for i in range(len(self.outs)))
-                            else "Тест остановлен до первых результатов.", err=True)
-        with_speed = [i for i in alive if res(i)[1] is not None and res(i)[1] >= 0]
-        best = max(with_speed, key=lambda i: res(i)[1]) if with_speed else min(alive, key=lambda i: res(i)[0])
+            asked = any(self.alive.get(o["tag"]) is not None or res(i)[0] is not None for i, o in enumerate(self.outs))
+            return self.say("Ни один сервер не ответил." if asked else "Тест остановлен до первых результатов.", err=True)
+        with_speed = [i for i in alive if show_speed and res(i)[1] is not None and res(i)[1] >= 0]
+        with_ping = [i for i in alive if show_ping and res(i)[0] is not None and res(i)[0] >= 0]
 
         # The test only reorders rows and reports. It never changes what the user picked: with «Быстрейший из списка»
         # selected, connecting must still switch servers by itself, not pin the connection to one of them.
         self.sort_rows()
         self.tree.yview_moveto(0)
-        p, sp = res(best)
-        what = f"{fmt_speed(sp)}, {fmt_ping(p)}" if sp is not None and sp >= 0 else fmt_ping(p)
-        if with_speed:
-            skipped = sum(1 for i in alive if res(i)[1] is not None and res(i)[1] < 0)
-            if skipped:
-                what += f"; у {skipped} серверов скорость не замерилась"
-        src = f" Скорость измерена загрузкой с {self.speed_host}." if getattr(self, "speed_host", "") else ""
-        hint = ("«Быстрейший из списка» сам выберет лучший по отклику и будет переключаться. "
-                "Чтобы подключаться только к одному серверу, выбери его в списке."
-                if self.tree.selection() and self.tree.selection()[0] == "auto" else "")
         try:
             write_json(EXITFILE, self.exit_cc)
         except OSError:
             pass
-        wrong = sum(1 for o in self.outs if self.exit_cc.get(okey(o)) and flags.code_for(o["tag"]) not in ("??", self.exit_cc[okey(o)]))
-        note = f" У {wrong} серверов страна в названии не совпала с реальным выходом: флаг показан по выходу." if wrong else ""
-        self.say(f"Самый быстрый: {flags.strip_flag(self.outs[best]['tag'])} ({what}).{src}{note} {hint}".strip())
+        src = note = hint = ""
+        if with_speed:
+            best = max(with_speed, key=lambda i: res(i)[1])
+            p, sp = res(best)
+            what = fmt_speed(sp) + (f", {fmt_ping(p)}" if show_ping and p is not None and p >= 0 else "")
+            skipped = sum(1 for i in alive if res(i)[1] is not None and res(i)[1] < 0)
+            if skipped:
+                what += f"; у {skipped} серверов скорость не замерилась"
+            head = f"Самый быстрый: {flags.strip_flag(self.outs[best]['tag'])} ({what})."
+            src = f" Скорость измерена загрузкой с {self.speed_host}." if getattr(self, "speed_host", "") else ""
+        elif with_ping:
+            best = min(with_ping, key=lambda i: res(i)[0])
+            head = f"Самый быстрый по отклику: {flags.strip_flag(self.outs[best]['tag'])} ({fmt_ping(res(best)[0])})."
+        else:
+            best = None
+            head = f"Ответили {len(alive)} из {len(self.outs)} серверов."
+        if show_flags:
+            wrong = sum(1 for o in self.outs
+                        if self.exit_cc.get(okey(o)) and flags.code_for(o["tag"]) not in ("??", self.exit_cc[okey(o)]))
+            if wrong:
+                note = f" У {wrong} серверов страна в названии не совпала с реальным выходом: флаг показан по выходу."
+        if best is not None and self.tree.selection() and self.tree.selection()[0] == "auto":
+            hint = ("«Быстрейший из списка» сам выберет лучший по отклику и будет переключаться. "
+                    "Чтобы подключаться только к одному серверу, выбери его в списке.")
+        self.say(f"{head}{src}{note} {hint}".strip())
 
     def sort_rows(self):
-        """Measured speed (desc), then ping (asc), unreachable and untested last; "auto" stays on top."""
+        """Measured speed (desc), then ping (asc); only what is switched on counts. Servers that did not answer and
+        untested ones go last; "auto" stays on top."""
         def key(i):
             p, sp = self.results.get(self.outs[i]["tag"], (None, None))
-            ok = p is not None and p >= 0
-            fast = sp is not None and sp >= 0
-            return (not ok, not fast, -(sp if fast else 0), p if ok else 0)
+            fast = self.v_speed.get() and sp is not None and sp >= 0
+            usep = self.v_ping.get() and p is not None and p >= 0
+            return (not self.is_alive(i), not fast, -(sp if fast else 0), p if usep else 0)
         start = 1 if self.tree.exists("auto") else 0
         for pos, i in enumerate(sorted(range(len(self.outs)), key=key)):
             self.tree.move(str(i), "", pos + start)
@@ -1701,15 +1939,14 @@ class App(tk.Tk):
             return self.stop()
         if not is_admin():
             self.say("Запусти приложение от имени администратора: без этого не создать сетевой адаптер.", err=True)
-            return messagebox.showerror(TITLE, "Запусти приложение от имени администратора (нужно для TUN).")
+            return show_error(self, "Запусти приложение от имени администратора (нужно для TUN).")
         if not self.outs:
             return self.say("Сначала добавь подписку и нажми «Обновить».", err=True)
         if self.testing:
             return self.say("Идёт тест скорости. Дождись конца или остановь его.", err=True)
         self.clean_done.wait(8)  # leftover cores from a previous run are being closed
         self.save()
-        if karing_running() and not messagebox.askyesno(
-                TITLE, "Запущен другой VPN-клиент (Karing / v2rayN / Hiddify / NekoRay).\n"
+        if karing_running() and not ask_yes_no(self, "Запущен другой VPN-клиент (Karing / v2rayN / Hiddify / NekoRay).\n"
                      "Два VPN сразу конфликтуют. Отключи его и нажми «Да», либо «Нет» для отмены."):
             return
         self.api = (free_port(), secrets.token_hex(16))  # new secret per connection, loopback only
@@ -1722,7 +1959,7 @@ class App(tk.Tk):
         if chk.returncode != 0:
             self.toggle_log(True)
             self.say("Конфиг не прошёл проверку, подробности в логе.", err=True)
-            return messagebox.showerror(TITLE, "Ошибка конфига:\n" + (chk.stderr or chk.stdout)[-800:])
+            return show_error(self, "Ошибка конфига:\n" + (chk.stderr or chk.stdout)[-800:])
         self.proc = start_core(RUNCFG)
         self.active = self.sel_name()
         self.state = "connecting"
@@ -1792,6 +2029,8 @@ class App(tk.Tk):
             self.refresh_power()
         if self.n % 2 == 0:
             self.tail()
+        if self.tray_ok and self.n % 2 == 0:
+            self.tray.update(self.state == "on", self.tray_title())
         if self.n % 4 == 0 or self.state == "connecting":  # which server is auto mode on now (and: is the core up yet)
             self.poll_current()
         if self.state == "connecting" and self.proc and self.proc.poll() is None:
@@ -1824,7 +2063,42 @@ class App(tk.Tk):
         except Exception:
             pass
 
+    def tray_title(self):
+        if self.state == "on":
+            name = flags.strip_flag(self.current) if self.current else ""
+            return ("VPN: подключено" + (f", {name}" if name else ""))[:100]
+        return "VPN: подключаю…" if self.state == "connecting" else "VPN: выключено"
+
+    def show_window(self):
+        """Bring the window back from the tray (or from behind other windows)."""
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        try:
+            self.attributes("-topmost", True)  # Windows only lets a window forward if it asks like this
+            self.after(300, lambda: self.attributes("-topmost", False))
+        except tk.TclError:
+            pass
+
+    def toggle_from_tray(self):
+        self.show_window()  # a prompt (admin rights, another VPN running) needs a visible window
+        self.toggle()
+
+    def hide_to_tray(self):
+        self.withdraw()
+        if not self.cfg.get("tray_hint_shown") and self.tray:
+            self.tray.notify("Программа работает в трее. Чтобы выйти совсем, выбери «Выход» в меню значка.")
+            self.cfg["tray_hint_shown"] = True
+            self.save(sources=False)
+
     def on_close(self):
+        """The window's X button: hide to the tray if there is one and the setting allows, otherwise quit."""
+        if self.tray_ok and self.cfg.get("tray_on_close", True) and not self.quitting:
+            return self.hide_to_tray()
+        self.quit_app()
+
+    def quit_app(self):
+        self.quitting = True
         self.save()
         self.test_stop.set()
         p = self.test_proc
@@ -1837,7 +2111,50 @@ class App(tk.Tk):
                 updater.apply_staged(info, relaunch=False)
         self.destroy()
 
+    def start_instance_server(self):
+        """Listen on a loopback port: a second launch connects here and this window comes forward."""
+        self._srv = None
+        try:
+            srv = socket.socket()
+            srv.bind(("127.0.0.1", 0))
+            srv.listen(4)
+            with open(INSTANCE_FILE, "w", encoding="utf-8") as f:
+                f.write(str(srv.getsockname()[1]))
+        except OSError:
+            return
+        self._srv = srv
+
+        def serve():
+            while True:
+                try:
+                    conn, _ = srv.accept()
+                except OSError:
+                    return  # closed on exit
+                try:
+                    conn.settimeout(2)
+                    if conn.recv(16).startswith(b"show"):
+                        self._ui(lambda: self.show_window())
+                        conn.sendall(b"ok\n")
+                except OSError:
+                    pass
+                finally:
+                    conn.close()
+        threading.Thread(target=serve, daemon=True).start()
+
     def destroy(self):
+        if getattr(self, "_srv", None):
+            try:
+                port = self._srv.getsockname()[1]
+                self._srv.close()
+                with open(INSTANCE_FILE, encoding="utf-8") as f:
+                    mine = f.read().strip() == str(port)
+                if mine:  # only our own entry; removed after the file is closed (Windows cannot delete an open file)
+                    os.remove(INSTANCE_FILE)
+            except OSError:
+                pass
+            self._srv = None
+        if self.tray:
+            self.tray.stop()
         for aid in (self._pump_id, self._tick_id):
             try:
                 self.after_cancel(aid)
@@ -1864,6 +2181,19 @@ def already_running():
 _LOCK = None
 
 
+def signal_running_instance():
+    """Ask the copy that is already running to show its window: a second launch should bring it forward, not nag."""
+    try:
+        with open(INSTANCE_FILE, encoding="utf-8") as f:
+            port = int(f.read().strip())
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as c:
+            c.settimeout(2)
+            c.sendall(b"show\n")
+            return c.recv(8).startswith(b"ok")
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def apply_pending_update():
     """At start: if automatic updates are on and a verified newer version is waiting, install it and restart."""
     try:
@@ -1886,18 +2216,20 @@ if __name__ == "__main__":
             pass
     sys.excepthook = log_crash
     threading.excepthook = lambda a: log_crash(a.exc_type, a.exc_value, a.exc_traceback)
-    if "--selftest" not in sys.argv and already_running():
-        if IS_WIN:
-            ctypes.windll.user32.MessageBoxW(0, "Приложение уже запущено.", TITLE, 0x40)
-        else:
+    if not any(a in sys.argv for a in ("--selftest", "--tray-selftest")) and already_running():
+        if not signal_running_instance():  # it did not answer: say so, in the app's style
             _r = tk.Tk()
             _r.withdraw()
-            messagebox.showinfo(TITLE, "Приложение уже запущено.")
+            Dialog(_r, "Приложение уже запущено, но не отвечает.\n\nЗакрой его в диспетчере задач и запусти снова.",
+                   ["OK"], "error", 0, 0)
         sys.exit(0)
     if "--selftest" in sys.argv:
         outs = parse_text(sys.stdin.read())
         json.dump(build_config(outs, "AUTO", True, ["example.com"]), open(RUNCFG, "w"), indent=1)
         print(len(outs), "outbounds")
+        sys.exit(0)
+    if "--tray-selftest" in sys.argv:
+        print(tray.selftest())
         sys.exit(0)
     if apply_pending_update():
         sys.exit(0)  # the helper swaps the files after we exit and starts the new version

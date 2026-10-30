@@ -13,8 +13,8 @@ if (-not (Test-Path "core\sing-box.exe")) {
     Copy-Item "$tmp\sing-box-$ver-windows-amd64\*" core -Force
 }
 
-python -m pip install pyinstaller pillow
+python -m pip install pyinstaller pillow pystray
 python make_icon.py
 python -m PyInstaller --noconfirm --onefile --windowed --uac-admin --name FimaVPN --icon icon.ico `
-    --add-data "core;core" --add-data "icon.ico;." vpn.py
+    --collect-submodules pystray --add-data "core;core" --add-data "icon.ico;." --add-data "icon.png;." vpn.py
 Write-Host "Done: dist\FimaVPN.exe"

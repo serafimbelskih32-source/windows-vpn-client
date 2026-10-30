@@ -21,15 +21,16 @@ if [ ! -x core/sing-box ]; then
   chmod +x core/sing-box
   rm -rf "$TMP"
 fi
-python3 -m pip install pyinstaller pillow
+python3 -m pip install pyinstaller pillow pystray
 python3 make_icon.py
 if [ "$(uname -s)" = "Darwin" ]; then
-  python3 -m PyInstaller --noconfirm --windowed --name FimaVPN --icon icon.icns \
+  python3 -m PyInstaller --noconfirm --windowed --name FimaVPN --icon icon.icns --collect-submodules pystray \
     --add-data "core:core" --add-data "icon.png:." vpn.py
   find dist/FimaVPN.app -name sing-box -type f -exec codesign --force -s - {} \;
   codesign --force --deep -s - dist/FimaVPN.app
   echo "Done: dist/FimaVPN.app"
 else
-  python3 -m PyInstaller --noconfirm --onefile --name FimaVPN --add-data "core:core" --add-data "icon.png:." vpn.py
+  python3 -m PyInstaller --noconfirm --onefile --name FimaVPN --collect-submodules pystray \
+    --add-data "core:core" --add-data "icon.png:." vpn.py
   echo "Done: dist/FimaVPN"
 fi

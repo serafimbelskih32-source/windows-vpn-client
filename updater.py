@@ -16,7 +16,7 @@ import time
 import urllib.request
 from urllib.parse import urlsplit
 
-VERSION = "1.1.0"  # the release workflow rewrites this line from the git tag
+VERSION = "1.2.0"  # the release workflow rewrites this line from the git tag
 REPO = "serafimbelskih32-source/windows-vpn-client"
 API = f"https://api.github.com/repos/{REPO}/releases/latest"
 ALLOWED_HOSTS = ("api.github.com", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com")
