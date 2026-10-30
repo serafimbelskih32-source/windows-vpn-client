@@ -1,0 +1,229 @@
+"""Self-update from GitHub releases. No GUI imports, so it can be tested on any system.
+
+Flow: ask the GitHub API for the latest release -> pick the asset for this system -> download it next to the
+release's SHA256SUMS.txt and verify the hash -> keep it staged in the data folder -> swap it in when the app is
+closed or started again (the running program cannot overwrite itself, so a tiny helper does the swap).
+"""
+import hashlib
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+from urllib.parse import urlsplit
+
+VERSION = "1.1.0"  # the release workflow rewrites this line from the git tag
+REPO = "serafimbelskih32-source/windows-vpn-client"
+API = f"https://api.github.com/repos/{REPO}/releases/latest"
+ALLOWED_HOSTS = ("api.github.com", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com")
+SUMS_NAME = "SHA256SUMS.txt"
+UA = "FimaVPN-updater"
+MAX_SIZE = 300 * 1024 * 1024
+MAX_TRIES = 3  # give up on a staged update that failed to install this many times
+ALLOW_ANY_HOST = False  # tests only
+
+
+def parse_version(s):
+    """'v1.2.3' -> (1, 2, 3); missing parts count as 0."""
+    nums = [int(n) for n in re.findall(r"\d+", str(s))[:3]]
+    return tuple(nums) + (0,) * (3 - len(nums))
+
+
+def asset_name(system=None, machine=None):
+    """Release asset that matches this system (the names are fixed by the release workflow)."""
+    system = system or sys.platform
+    arm = (machine or platform.machine()).lower() in ("arm64", "aarch64")
+    if system == "win32":
+        return "FimaVPN.exe"
+    if system == "darwin":
+        return f"FimaVPN-macos-{'arm64' if arm else 'x86_64'}.zip"
+    return f"FimaVPN-linux-{'arm64' if arm else 'x86_64'}"
+
+
+def _check_url(url):
+    u = urlsplit(url)
+    if not ALLOW_ANY_HOST and (u.scheme != "https" or u.hostname not in ALLOWED_HOSTS):
+        raise ValueError(f"адрес не из списка разрешённых: {u.hostname}")
+
+
+def _open(url, timeout=30):
+    _check_url(url)
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/vnd.github+json, */*"})
+    r = urllib.request.urlopen(req, timeout=timeout)
+    try:
+        _check_url(r.geturl())  # a redirect must not lead away from GitHub either
+    except ValueError:
+        r.close()
+        raise
+    return r
+
+
+def latest(api=None):
+    """{'version': '1.2.0', 'assets': {name: url}} for the newest published release."""
+    with _open(api or API) as r:
+        j = json.load(r)
+    return {"version": str(j["tag_name"]).lstrip("v"),
+            "assets": {a["name"]: a["browser_download_url"] for a in j.get("assets", [])}}
+
+
+def find_update(current=VERSION, info=None, name=None):
+    """None if up to date or the release is not complete yet, else {'version','name','url','sums'}."""
+    info = info or latest()
+    if parse_version(info["version"]) <= parse_version(current):
+        return None
+    name = name or asset_name()
+    if name not in info["assets"] or SUMS_NAME not in info["assets"]:
+        return None
+    return {"version": info["version"], "name": name, "url": info["assets"][name], "sums": info["assets"][SUMS_NAME]}
+
+
+def parse_sums(text):
+    """'<sha256>  <file>' lines (sha256sum format, '*' marks binary mode) -> {file: sha256}."""
+    out = {}
+    for line in text.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]):
+            out[parts[1].strip().lstrip("*")] = parts[0].lower()
+    return out
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_json(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
+
+
+def stage(upd, dest_dir, progress=None):
+    """Download the asset, verify it against SHA256SUMS.txt and remember it for the next start.
+    Raises ValueError on any mismatch; nothing is left staged in that case."""
+    os.makedirs(dest_dir, exist_ok=True)
+    with _open(upd["sums"]) as r:
+        expected = parse_sums(r.read(1_000_000).decode("utf-8", "replace")).get(upd["name"])
+    if not expected:
+        raise ValueError("в релизе нет контрольной суммы для этого файла")
+    final = os.path.join(dest_dir, upd["name"])
+    part = final + ".part"
+    h, size = hashlib.sha256(), 0
+    try:
+        with _open(upd["url"], timeout=60) as r, open(part, "wb") as f:
+            for chunk in iter(lambda: r.read(1 << 20), b""):
+                size += len(chunk)
+                if size > MAX_SIZE:
+                    raise ValueError("файл обновления слишком большой")
+                h.update(chunk)
+                f.write(chunk)
+                if progress:
+                    progress(size)
+        if h.hexdigest() != expected:
+            raise ValueError("контрольная сумма скачанного файла не совпала")
+        os.replace(part, final)
+    finally:
+        if os.path.exists(part):
+            os.remove(part)
+    info = {"version": upd["version"], "name": upd["name"], "path": final, "sha256": expected, "tries": 0}
+    _write_json(os.path.join(dest_dir, "staged.json"), info)
+    return info
+
+
+def staged(dest_dir, current=VERSION):
+    """The staged update if it is newer than `current`, intact, and has not failed too often; else None."""
+    path = os.path.join(dest_dir, "staged.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            info = json.load(f)
+        if parse_version(info["version"]) <= parse_version(current) or info.get("tries", 0) >= MAX_TRIES:
+            return None
+        if not os.path.isfile(info["path"]) or sha256_file(info["path"]) != info["sha256"]:
+            return None
+        info["_json"] = path
+        return info
+    except Exception:
+        return None
+
+
+def discard(dest_dir):
+    shutil.rmtree(dest_dir, ignore_errors=True)
+
+
+# ----- swapping the new program in -----
+def _ps_quote(p):
+    return "'" + p.replace("'", "''") + "'"
+
+
+def apply_windows(src, dst, pids, relaunch):
+    """Detached PowerShell: wait until the old program exits (its exe is locked until then), copy, restart."""
+    wait = f"Wait-Process -Id {','.join(str(p) for p in pids)} -ErrorAction SilentlyContinue; " if pids else ""
+    script = (wait +
+              "for ($i = 0; $i -lt 60; $i++) { try { "
+              f"Copy-Item -LiteralPath {_ps_quote(src)} -Destination {_ps_quote(dst)} -Force -ErrorAction Stop; "
+              f"Remove-Item -LiteralPath {_ps_quote(src)} -Force -ErrorAction SilentlyContinue; break "
+              "} catch { Start-Sleep -Milliseconds 500 } }; " +
+              (f"Start-Process -FilePath {_ps_quote(dst)}" if relaunch else ""))
+    # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW. (DETACHED_PROCESS would make powershell exit silently.)
+    flags = 0x00000200 | 0x08000000
+    subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+                      "-Command", script], creationflags=flags, close_fds=True)
+
+
+def apply_linux(src, dst, relaunch):
+    """A running binary can be replaced by renaming over it; the copy goes next to it first (same filesystem)."""
+    tmp = dst + ".new"
+    shutil.copyfile(src, tmp)
+    os.chmod(tmp, 0o755)
+    os.replace(tmp, dst)
+    os.remove(src)
+    if relaunch:
+        os.execv(dst, [dst])
+
+
+def apply_macos(src_zip, bundle, relaunch, pids):
+    """Unpack the .app from the zip, then a detached shell swaps the bundle after this process exits."""
+    work = os.path.join(os.path.dirname(src_zip), "extract")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    subprocess.run(["ditto", "-x", "-k", src_zip, work], check=True)
+    apps = [n for n in os.listdir(work) if n.endswith(".app")]
+    if not apps:
+        raise ValueError("в архиве нет приложения")
+    new = os.path.join(work, apps[0])
+    q = lambda p: "'" + p.replace("'", "'\\''") + "'"  # noqa: E731
+    wait = "".join(f"while kill -0 {p} 2>/dev/null; do sleep 0.5; done; " for p in pids)
+    script = f"{wait}rm -rf {q(bundle)} && mv {q(new)} {q(bundle)} && rm -f {q(src_zip)}" + (f"; open {q(bundle)}" if relaunch else "")
+    subprocess.Popen(["/bin/sh", "-c", script], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def apply_staged(info, relaunch, exe=None, pids=None):
+    """Hand the staged update over to the swap helper. Returns True when the caller should exit now.
+    Only a frozen (packaged) program can be replaced; from source this does nothing."""
+    if not getattr(sys, "frozen", False) and exe is None:
+        return False
+    exe = exe or sys.executable
+    if pids is None:
+        pids = [os.getpid()] + ([os.getppid()] if sys.platform == "win32" else [])  # onefile: bootloader holds the exe
+    try:
+        info["tries"] = info.get("tries", 0) + 1
+        if info.get("_json"):
+            _write_json(info["_json"], {k: v for k, v in info.items() if k != "_json"})
+        if sys.platform == "win32":
+            apply_windows(info["path"], exe, pids, relaunch)
+        elif sys.platform == "darwin":
+            bundle = os.path.abspath(os.path.join(os.path.dirname(exe), "..", ".."))
+            apply_macos(info["path"], bundle, relaunch, pids)
+        else:
+            apply_linux(info["path"], exe, relaunch)
+        return True
+    except Exception:
+        return False

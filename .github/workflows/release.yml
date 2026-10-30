@@ -1,0 +1,137 @@
+name: build and release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SINGBOX_VERSION: "1.13.14"
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows,      os: windows-latest,   core: windows-amd64, asset: FimaVPN.exe }
+          - { name: linux-x86_64, os: ubuntu-22.04,     core: linux-amd64,   asset: FimaVPN-linux-x86_64 }
+          - { name: linux-arm64,  os: ubuntu-22.04-arm, core: linux-arm64,   asset: FimaVPN-linux-arm64 }
+          - { name: macos-arm64,  os: macos-14,         core: darwin-arm64,  asset: FimaVPN-macos-arm64.zip }
+          - { name: macos-x86_64, os: macos-15-intel,   core: darwin-amd64,  asset: FimaVPN-macos-x86_64.zip }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Linux packages (Tk, virtual display)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb
+
+      - name: Put the tag into the program version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: python
+        run: |
+          import os, re
+          v = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          s = open("updater.py", encoding="utf-8").read()
+          s = re.sub(r'^VERSION = ".*"', f'VERSION = "{v}"', s, count=1, flags=re.M)
+          open("updater.py", "w", encoding="utf-8").write(s)
+          print("VERSION =", v)
+
+      - name: Download the sing-box core
+        shell: bash
+        run: |
+          set -e
+          V="$SINGBOX_VERSION"
+          N="sing-box-$V-${{ matrix.core }}"
+          mkdir -p core sb
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            curl -sSL --fail -o sb.zip "https://github.com/SagerNet/sing-box/releases/download/v$V/$N.zip"
+            unzip -q -o sb.zip -d sb
+            cp sb/$N/* core/
+          else
+            curl -sSL --fail -o sb.tgz "https://github.com/SagerNet/sing-box/releases/download/v$V/$N.tar.gz"
+            tar -xzf sb.tgz -C sb
+            cp "sb/$N/sing-box" core/sing-box
+            cp "sb/$N/LICENSE" core/LICENSE 2>/dev/null || true
+            chmod +x core/sing-box
+          fi
+          ls -la core
+
+      - name: Icons
+        run: pip install pillow && python make_icon.py
+
+      - name: Tests
+        shell: bash
+        run: |
+          python tests/test_updater.py
+          python tests/test_supervisor.py
+          python vpn.py --selftest < tests/sample_links.txt
+          if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python tests/gui_smoke.py; else python tests/gui_smoke.py; fi
+
+      - name: Build the program
+        shell: bash
+        run: |
+          set -e
+          pip install pyinstaller==6.22.3
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            pyinstaller --noconfirm --onefile --windowed --uac-admin --name FimaVPN --icon icon.ico \
+              --add-data "core;core" --add-data "icon.ico;." vpn.py
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            pyinstaller --noconfirm --windowed --name FimaVPN --icon icon.icns \
+              --add-data "core:core" --add-data "icon.png:." vpn.py
+            # ad-hoc signature: Apple Silicon refuses to run unsigned code
+            find dist/FimaVPN.app -name sing-box -type f -exec codesign --force -s - {} \;
+            codesign --force --deep -s - dist/FimaVPN.app
+            ditto -c -k --sequesterRsrc --keepParent dist/FimaVPN.app "dist/${{ matrix.asset }}"
+          else
+            pyinstaller --noconfirm --onefile --name FimaVPN --add-data "core:core" --add-data "icon.png:." vpn.py
+            mv dist/FimaVPN "dist/${{ matrix.asset }}"
+          fi
+          ls -la dist
+
+      - name: Check the built program starts
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a "dist/${{ matrix.asset }}" --selftest < tests/sample_links.txt
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            dist/FimaVPN.app/Contents/MacOS/FimaVPN --selftest < tests/sample_links.txt
+            find dist/FimaVPN.app -name sing-box -type f -exec ls -la {} \;
+          else
+            ls -la "dist/${{ matrix.asset }}"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: publish the release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Checksums
+        run: cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/* \
+            --repo "$GITHUB_REPOSITORY" --title "VPN $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md --latest

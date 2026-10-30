@@ -1,7 +1,8 @@
-"""FimaVPN - Windows VPN client on top of sing-box (TUN, system-wide).
+"""FimaVPN - VPN client for Windows, Linux and macOS on top of sing-box (TUN, system-wide).
 
 Paste a subscription URL or share links (vless/vmess/trojan/ss/hysteria2/tuic),
-pick a server, press Connect. Needs admin rights (TUN adapter); the exe asks for it.
+pick a server, press Connect. The TUN adapter needs admin rights: on Windows the exe asks for them at start,
+on Linux/macOS only the core is started as root (pkexec / the macOS admin prompt) when you press Connect.
 """
 import base64
 import ctypes
@@ -10,6 +11,7 @@ import os
 import queue
 import re
 import secrets
+import shlex
 import socket
 import subprocess
 import sys
@@ -23,9 +25,28 @@ from tkinter import messagebox, ttk
 from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 import http.client
 
+import updater
+
 APP = "FimaVPN"  # settings folder name only
 TITLE = "VPN"
-DATA = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP)
+IS_WIN = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
+IS_LINUX = sys.platform.startswith("linux")
+
+
+def data_dir():
+    if IS_WIN:
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+    elif IS_MAC:
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    return os.path.join(base, APP)
+
+
+DATA = data_dir()
+STOPFILE = os.path.join(DATA, "stop")  # Linux/macOS: the root supervisor stops the core when this file appears
+UPDATE_DIR = os.path.join(DATA, "update")  # a downloaded, verified update waits here for the next start
 SETTINGS = os.path.join(DATA, "settings.json")
 RUNCFG = os.path.join(DATA, "run.json")
 LOGFILE = os.path.join(DATA, "sing-box.log")
@@ -37,9 +58,25 @@ os.makedirs(DATA, exist_ok=True)
 
 BASE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 CORE_DIR = os.path.join(BASE, "core")
-CORE = os.path.join(CORE_DIR, "sing-box.exe")
-NOWIN = 0x08000000  # CREATE_NO_WINDOW
+CORE = os.path.join(CORE_DIR, "sing-box.exe" if IS_WIN else "sing-box")
+NOWIN = 0x08000000 if IS_WIN else 0  # CREATE_NO_WINDOW
 MIXED_PORT = 2080
+if not IS_WIN:
+    try:
+        os.chmod(CORE, 0o755)  # bundled data files may lose the executable bit
+    except OSError:
+        pass
+
+# Fonts: the window was designed around Bahnschrift (Windows); other systems get the closest installed face.
+UI_FONTS = (("Bahnschrift SemiCondensed", "Bahnschrift", "Segoe UI") if IS_WIN else
+            ("Helvetica Neue", "Arial") if IS_MAC else
+            ("DejaVu Sans Condensed", "Noto Sans", "DejaVu Sans", "Liberation Sans"))
+MONO = "Consolas" if IS_WIN else "Menlo" if IS_MAC else "DejaVu Sans Mono"
+
+
+def FZ(n):
+    """Font size: Tk on macOS counts points as pixels (72 dpi), so sizes need a boost to match Windows."""
+    return int(round(n * 1.33)) if IS_MAC else n
 
 RU_SUFFIXES = ["ru", "su", "xn--p1ai", "yandex.net", "yastatic.net", "vk.com", "userapi.com",
                "vkuser.net", "mail.ru", "ok.ru", "sberbank.ru", "tinkoff.ru", "gosuslugi.ru"]
@@ -92,8 +129,10 @@ def make_job():
 
 
 def own(proc):
-    """Tie a child process to our lifetime (see make_job)."""
+    """Tie a child process to our lifetime (see make_job). Windows only; Linux/macOS use the supervisor script."""
     global _JOB
+    if not IS_WIN:
+        return
     try:
         if _JOB is None:
             _JOB = make_job()
@@ -434,8 +473,9 @@ def build_config(outs, chosen, ru_direct, extra_direct, api=None):
                             {"type": "udp", "tag": "local", "server": "77.88.8.8"}],
                 "rules": dns_rules, "final": "remote", "strategy": "ipv4_only"},
         "inbounds": [
-            {"type": "tun", "tag": "tun-in", "interface_name": TUN_NAME, "address": ["172.19.0.1/30"], "auto_route": True,
-             "strict_route": True, "stack": "mixed"},
+            dict({"type": "tun", "tag": "tun-in", "address": ["172.19.0.1/30"], "auto_route": True,
+                  "strict_route": True, "stack": "mixed"},
+                 **({} if IS_MAC else {"interface_name": TUN_NAME})),  # macOS names must be utunN: let the core pick
             {"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": MIXED_PORT},
         ],
         "outbounds": outs + [proxy_out, {"type": "direct", "tag": "direct"}],
@@ -465,6 +505,9 @@ def P(n):
 
 
 def is_admin():
+    """Windows: the exe is elevated. Linux/macOS: the window never is; the core asks for rights when it starts."""
+    if not IS_WIN:
+        return True
     try:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
@@ -473,23 +516,32 @@ def is_admin():
 
 def karing_running():
     try:
-        out = subprocess.run(["tasklist"], capture_output=True, text=True, creationflags=NOWIN).stdout.lower()
-        return any(n in out for n in ("karing.exe", "karingservice.exe", "v2rayn.exe", "hiddify.exe", "nekoray.exe"))
+        if IS_WIN:
+            out = subprocess.run(["tasklist"], capture_output=True, text=True, creationflags=NOWIN).stdout.lower()
+            return any(n in out for n in ("karing.exe", "karingservice.exe", "v2rayn.exe", "hiddify.exe", "nekoray.exe"))
+        out = subprocess.run(["ps", "-A", "-o", "comm="], capture_output=True, text=True, timeout=10).stdout.lower()
+        return any(n in out for n in ("karing", "v2rayn", "hiddify", "nekoray", "throne"))
     except Exception:
         return False
+
+
+# Hardware key codes of the V, C, X, A keys: they do not depend on the keyboard layout, unlike Tk's keysym.
+CLIP_KEYS = ({86: "v", 67: "c", 88: "x", 65: "a"} if IS_WIN else
+             {55: "v", 54: "c", 53: "x", 38: "a"} if IS_LINUX else {})  # macOS: native Command shortcuts
 
 
 def enable_clipboard(w):
     """Ctrl+C/V/X/A and a right-click menu that work on ANY keyboard layout (Tk binds by keysym,
     so on the Russian layout Ctrl+V does nothing by default)."""
     def on_key(e):
-        if e.keycode == 86:
+        k = CLIP_KEYS.get(e.keycode)
+        if k == "v":
             w.event_generate("<<Paste>>")
-        elif e.keycode == 67:
+        elif k == "c":
             w.event_generate("<<Copy>>")
-        elif e.keycode == 88:
+        elif k == "x":
             w.event_generate("<<Cut>>")
-        elif e.keycode == 65:
+        elif k == "a":
             select_all()
         else:
             return None
@@ -512,8 +564,13 @@ def enable_clipboard(w):
     def popup(e):
         w.focus_set()
         menu.tk_popup(e.x_root, e.y_root)
-    w.bind("<Control-KeyPress>", on_key)
-    w.bind("<Button-3>", popup)
+    if CLIP_KEYS:
+        w.bind("<Control-KeyPress>", on_key)
+    if IS_MAC:  # secondary click is Button-2 (or Control+click) on macOS
+        w.bind("<Button-2>", popup)
+        w.bind("<Control-Button-1>", popup)
+    else:
+        w.bind("<Button-3>", popup)
 
 
 class Flat(tk.Label):
@@ -603,11 +660,11 @@ class Power(tk.Canvas):
         title = {"off": "Подключить", "connecting": "Подключаю", "on": "Отключить"}[self.state]
         if self.state == "connecting":
             title += " █" if self.blink else ""
-        self.create_text(d + P(24), d + P(40), text=title, anchor="w", fill=fg, font=(self.fam, int(24 * S) if S > 1 else 24, "bold"))
+        self.create_text(d + P(24), d + P(40), text=title, anchor="w", fill=fg, font=(self.fam, FZ(24), "bold"))
         if self.clock:
-            self.create_text(x1 - P(22), d + P(40), text=self.clock, anchor="e", fill=fg, font=("Consolas", 16, "bold"))
+            self.create_text(x1 - P(22), d + P(40), text=self.clock, anchor="e", fill=fg, font=(MONO, FZ(16), "bold"))
         name = self.server if len(self.server) <= 40 else self.server[:39] + "…"
-        self.create_text(d + P(24), y1 - P(30), text=name, anchor="w", fill=sub, font=(self.fam, 11))
+        self.create_text(d + P(24), y1 - P(30), text=name, anchor="w", fill=sub, font=(self.fam, FZ(11)))
         if self.focused:
             self.create_rectangle(d + P(10), d + P(10), x1 - P(8), y1 - P(8), outline=fg, dash=(3, 3))
 
@@ -648,8 +705,33 @@ def build_test_config(outs, nic=None):
     return cfg
 
 
+TUNLIKE = re.compile(r"^(tun|utun|wg|tailscale|ppp|ipsec|zt|sing|" + re.escape(TUN_NAME) + ")", re.I)
+
+
+def posix_nic():
+    """Real adapter behind the IPv4 default route on Linux/macOS, skipping tunnel-like devices (ours or another VPN)."""
+    try:
+        if IS_MAC:
+            out = subprocess.run(["netstat", "-rn", "-f", "inet"], capture_output=True, text=True, timeout=10).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 4 and parts[0] == "default" and not TUNLIKE.match(parts[3]):
+                    return parts[3]
+            return None
+        out = subprocess.run(["ip", "-4", "route", "show", "default"], capture_output=True, text=True, timeout=10).stdout
+        for line in out.splitlines():
+            m = re.search(r"\bdev (\S+)", line)
+            if m and not TUNLIKE.match(m.group(1)):
+                return m.group(1)
+    except Exception:
+        pass
+    return None
+
+
 def physical_nic():
     """Name of the real network adapter (lowest-metric IPv4 default route that is not our TUN), or None."""
+    if not IS_WIN:
+        return posix_nic()
     ps = ("[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
           f"$r = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Where-Object {{ $_.InterfaceAlias -ne '{TUN_NAME}' }});"
           "$p = @((Get-NetAdapter -Physical | Where-Object { $_.Status -eq 'Up' }).InterfaceIndex);"
@@ -679,6 +761,8 @@ def kill_stale_cores(own_pids=()):
     """Stop sing-box processes started from our config folder by an earlier run of this app (the window was killed
     or crashed). A leftover core keeps the TUN adapter and DNS capture alive while the window says 'off', so every
     other program, including our own speed test, silently goes through it."""
+    if not IS_WIN:
+        return 0  # Linux/macOS: the root supervisor script stops the core when the window dies
     ps = ("Get-CimInstance Win32_Process -Filter \"Name='sing-box.exe'\" | "
           "ForEach-Object { '{0}|{1}' -f $_.ProcessId, $_.CommandLine }")
     try:
@@ -690,6 +774,60 @@ def kill_stale_cores(own_pids=()):
     for pid in pids:
         subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, creationflags=NOWIN)
     return len(pids)
+
+
+def supervisor_script(core, cfg_path, stopfile, gui_pid):
+    """Shell script that runs the core and stops it when the window process is gone, the core exits on its own,
+    or `stopfile` appears. Its exit status is the core's, so a crash is visible to the window."""
+    q = shlex.quote
+    return (f"{q(core)} run -c {q(cfg_path)} & C=$!; "
+            f"while kill -0 {gui_pid} 2>/dev/null && kill -0 $C 2>/dev/null && [ ! -e {q(stopfile)} ]; "
+            f"do sleep 1; done; kill $C 2>/dev/null; wait $C; exit $?")
+
+
+def start_core(cfg_path):
+    """Start the VPN core with TUN rights. Windows: this process is already elevated. Linux/macOS: only the core
+    runs as root (pkexec / the macOS admin prompt), inside a small supervisor that stops it as soon as this window
+    dies, the core crashes, or STOPFILE appears - so disconnecting never needs a second password."""
+    if IS_WIN:
+        p = subprocess.Popen([CORE, "run", "-c", cfg_path], cwd=DATA, creationflags=NOWIN,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        own(p)
+        return p
+    try:
+        os.remove(STOPFILE)
+    except OSError:
+        pass
+    q = shlex.quote
+    inner = supervisor_script(CORE, cfg_path, STOPFILE, os.getpid())
+    if IS_MAC:
+        shell = "/bin/sh -c " + q(inner)
+        script = 'do shell script "' + shell.replace("\\", "\\\\").replace('"', '\\"') + '" with administrator privileges'
+        cmd = ["osascript", "-e", script]
+    else:
+        cmd = ["pkexec", "/bin/sh", "-c", inner]
+    return subprocess.Popen(cmd, cwd=DATA, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+
+def stop_core(proc):
+    """Stop what start_core started and wait for it."""
+    if not proc or proc.poll() is not None:
+        return
+    if not IS_WIN:
+        try:
+            open(STOPFILE, "w").close()  # the root supervisor notices within a second and stops the core
+        except OSError:
+            pass
+        try:
+            proc.wait(8)
+            return
+        except Exception:
+            pass
+    proc.terminate()
+    try:
+        proc.wait(5)
+    except Exception:
+        proc.kill()
 
 
 def free_port():
@@ -824,16 +962,20 @@ class App(tk.Tk):
         self.report_callback_exception = on_error
         self.title(TITLE)
         try:
-            self.iconbitmap(os.path.join(BASE, "icon.ico"))
+            if IS_WIN:
+                self.iconbitmap(os.path.join(BASE, "icon.ico"))
+            else:
+                self._icon = tk.PhotoImage(file=os.path.join(BASE, "icon.png"))  # keep a reference
+                self.iconphoto(True, self._icon)
         except Exception:
             pass
         self.configure(bg=BG)
-        self.geometry(f"{P(480)}x{P(800)}")
-        self.minsize(P(440), P(720))
+        self.geometry(f"{P(480)}x{P(840)}")
+        self.minsize(P(440), P(760))
         fams = set(tkfont.families())
-        fam = next((f for f in ("Bahnschrift SemiCondensed", "Bahnschrift", "Segoe UI") if f in fams), "Segoe UI")
+        fam = next((f for f in UI_FONTS if f in fams), UI_FONTS[-1])
         self.fam = fam
-        self.f_h, self.f_b, self.f_s = (fam, 12, "bold"), (fam, 11), (fam, 10)
+        self.f_h, self.f_b, self.f_s = (fam, FZ(12), "bold"), (fam, FZ(11)), (fam, FZ(10))
         self.proc = None
         self.test_proc = None
         self.testing = False
@@ -849,6 +991,7 @@ class App(tk.Tk):
         self.api = None  # (port, secret) of the running core's local API
         self.current = ""  # server the core is using right now
         self.polling = False
+        self.t_conn = 0.0  # when the last connect started
         self.uiq = queue.Queue()  # callables from worker threads, run by pump() on the Tk thread
         self._pick = None  # row the app selected itself (see on_select)
         self._pump_id = self._tick_id = None
@@ -858,7 +1001,10 @@ class App(tk.Tk):
         self.blink = True
         self.n = 0
         self._pos = 0
-        self.cfg = {"sources": "", "chosen": "AUTO", "ru_direct": True, "extra": "", "rules_ok": 0, "rules_try": 0}
+        self.pending = None  # a verified update that is downloaded and waiting to be installed
+        self.upd_busy = False
+        self.cfg = {"sources": "", "chosen": "AUTO", "ru_direct": True, "extra": "", "rules_ok": 0, "rules_try": 0,
+                    "auto_update": None}  # None = not asked yet
         try:
             self.cfg.update(json.load(open(SETTINGS, encoding="utf-8-sig")))
         except Exception:
@@ -882,7 +1028,7 @@ class App(tk.Tk):
         root = tk.Frame(self, bg=BG)
         root.pack(fill="both", expand=True, padx=side, pady=(P(18), P(16)))
 
-        if not is_admin():
+        if IS_WIN and not is_admin():
             tk.Label(root, text="Нужны права администратора", font=self.f_s, bg=RED, fg=WHITE,
                      padx=P(8), pady=P(4)).pack(fill="x", pady=(0, P(12)))
 
@@ -910,7 +1056,7 @@ class App(tk.Tk):
         self.tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
-        self.tree.tag_configure("live", foreground=BLUE, font=(fam, 11, "bold"))
+        self.tree.tag_configure("live", foreground=BLUE, font=(fam, FZ(11), "bold"))
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind("<Double-1>", lambda e: self.toggle() if self.state == "off" else None)
 
@@ -937,7 +1083,7 @@ class App(tk.Tk):
         self.sub_note.pack(side="left", padx=(P(10), 0))
         sbx = tk.Frame(root, bg=INK, padx=P(2), pady=P(2))
         sbx.pack(fill="x")
-        self.src = tk.Text(sbx, height=3, wrap="char", font=("Consolas", 9), bg=PAPER, fg=INK, relief="flat", bd=0,
+        self.src = tk.Text(sbx, height=3, wrap="char", font=(MONO, FZ(9)), bg=PAPER, fg=INK, relief="flat", bd=0,
                            highlightthickness=0, insertbackground=INK, selectbackground=BLUE,
                            selectforeground=WHITE, padx=P(6), pady=P(5))
         self.src.pack(fill="x")
@@ -949,9 +1095,19 @@ class App(tk.Tk):
         self.log_head.pack(fill="x", pady=(P(16), P(4)))
         self.log_head.bind("<Button-1>", lambda e: self.toggle_log())
         self.log_box = tk.Frame(root, bg=INK, padx=P(2), pady=P(2))
-        self.log = tk.Text(self.log_box, height=8, state="disabled", bg=INK, fg="#C9CED6", font=("Consolas", 9),
+        self.log = tk.Text(self.log_box, height=8, state="disabled", bg=INK, fg="#C9CED6", font=(MONO, FZ(9)),
                            relief="flat", bd=0, highlightthickness=0, selectbackground=BLUE, padx=P(6), pady=P(5))
         self.log.pack(fill="both", expand=True)
+
+        # program updates
+        urow = tk.Frame(root, bg=BG)
+        urow.pack(fill="x", pady=(P(14), 0))
+        self.upd_var = tk.BooleanVar(value=bool(self.cfg.get("auto_update")))
+        Check(urow, "Обновлять программу автоматически", self.upd_var, self.f_s).pack(side="left")
+        self.upd_btn = Flat(urow, "Проверить", self.on_upd_click, self.f_s)
+        self.upd_btn.pack(side="right")
+        tk.Label(urow, text=f"v{updater.VERSION}", font=self.f_s, bg=BG, fg=MUTE).pack(side="right", padx=(0, P(10)))
+        self.upd_var.trace_add("write", self.on_upd_toggle)
 
         for w in (self.src, self.extra, self.log):
             enable_clipboard(w)
@@ -971,6 +1127,87 @@ class App(tk.Tk):
         self._pump_id = self.after(50, self.pump)
         self.after(300, self.refresh_due)
         self._tick_id = self.after(500, self.tick)
+        self.after(1500, self.update_startup)
+
+    # ----- program updates -----
+    def frozen(self):
+        return bool(getattr(sys, "frozen", False))
+
+    def update_startup(self):
+        """First start: ask whether to update automatically. Then check, if the answer is yes."""
+        if not self.frozen():
+            return  # running from source: there is no program file to replace
+        if self.cfg.get("auto_update") is None:
+            yes = messagebox.askyesno(
+                TITLE, "Обновлять программу автоматически?\n\n"
+                       "Когда на GitHub выйдет новая версия, программа скачает её, проверит контрольную сумму и "
+                       "установит при следующем запуске. Ничего о тебе не отправляется.\n\n"
+                       "Это можно включить и выключить внизу окна.")
+            self.upd_var.set(bool(yes))  # the trace saves the choice
+            self.cfg["auto_update"] = bool(yes)
+            self.save(sources=False)
+        if self.cfg.get("auto_update"):
+            self.update_check()
+
+    def on_upd_toggle(self, *a):
+        self.cfg["auto_update"] = bool(self.upd_var.get())
+        self.save(sources=False)
+        if self.cfg["auto_update"]:
+            self.update_check()
+
+    def on_upd_click(self):
+        if self.pending:
+            return self.install_now()
+        self.update_check(manual=True)
+
+    def update_check(self, manual=False):
+        """Look for a newer release and download it in the background. Auto mode installs it at the next start."""
+        if self.upd_busy:
+            return
+        if not self.frozen():
+            if manual:
+                self.say("Обновление работает в собранной программе, а не при запуске из исходников.")
+            return
+        self.upd_busy = True
+        if manual:
+            self.say("Проверяю обновления…")
+
+        def work():
+            upd = got = err = None
+            try:
+                upd = updater.find_update()
+                if upd:
+                    got = updater.stage(upd, UPDATE_DIR)
+            except Exception as e:  # noqa: BLE001
+                err = str(e)
+            self._ui(lambda: self.update_done(upd, got, err, manual))
+        threading.Thread(target=work, daemon=True).start()
+
+    def update_done(self, upd, got, err, manual):
+        self.upd_busy = False
+        if err:
+            return self.say(f"Не удалось проверить обновления: {err}", err=True) if manual else None
+        if not upd:
+            return self.say(f"Установлена последняя версия ({updater.VERSION}).") if manual else None
+        self.pending = got
+        self.upd_btn.config(text=f"Установить {upd['version']}")
+        if manual:
+            if messagebox.askyesno(TITLE, f"Версия {upd['version']} скачана и проверена.\nУстановить сейчас? "
+                                          "Программа перезапустится."):
+                return self.install_now()
+        self.say(f"Версия {upd['version']} скачана. " + ("Установится при следующем запуске."
+                                                         if self.cfg.get("auto_update") else "Нажми «Установить»."))
+
+    def install_now(self):
+        if self.state != "off" and not messagebox.askyesno(TITLE, "VPN отключится на время обновления. Продолжить?"):
+            return
+        self.save()
+        self.test_stop.set()
+        self.stop()
+        if updater.apply_staged(self.pending, relaunch=True):
+            self.destroy()
+            sys.exit(0)
+        self.say("Не удалось установить обновление. Скачай новую версию с GitHub вручную.", err=True)
 
     # ----- small helpers -----
     def section(self, parent, title):
@@ -983,7 +1220,7 @@ class App(tk.Tk):
         self.log_open = (not self.log_open) if force is None else force
         self.log_head.config(text=("▾ Лог" if self.log_open else "▸ Лог"))
         if self.log_open:
-            self.log_box.pack(fill="x")
+            self.log_box.pack(fill="x", after=self.log_head)  # keep it above the update row
             self.geometry("")
         else:
             self.log_box.pack_forget()
@@ -1247,6 +1484,8 @@ class App(tk.Tk):
             # Always measure around any tunnel (ours, a leftover core, Karing...), not through it: sockets are bound
             # to the real adapter. Without a VPN this changes nothing, so no need to guess whether one is up.
             nic = physical_nic()
+            if IS_LINUX and self.state == "off":
+                nic = None  # binding sockets to a device may need CAP_NET_RAW on old kernels; only do it when needed
             if not nic and self.state != "off":
                 raise RuntimeError("не нашёл сетевой адаптер для замера мимо VPN")
             outs = resolve_servers(outs)
@@ -1385,37 +1624,28 @@ class App(tk.Tk):
             self.toggle_log(True)
             self.say("Конфиг не прошёл проверку, подробности в логе.", err=True)
             return messagebox.showerror(TITLE, "Ошибка конфига:\n" + (chk.stderr or chk.stdout)[-800:])
-        self.proc = subprocess.Popen([CORE, "run", "-c", RUNCFG], cwd=DATA, creationflags=NOWIN,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        own(self.proc)
+        self.proc = start_core(RUNCFG)
         self.active = self.sel_name()
         self.state = "connecting"
-        self.say("")
+        self.t_conn = time.time()
+        self.say("" if IS_WIN else "Подтверди права администратора в окне системы.")
         self.refresh_power()
-        self.after(2500, self.check_alive)
-
-    def check_alive(self):
-        if self.state != "connecting":
-            return
-        if self.proc and self.proc.poll() is None:
-            self.state = "on"
-            self.t0 = time.time()
-            self.refresh_power()
-        else:
-            self.fail()
 
     def fail(self):
+        rc = self.proc.poll() if self.proc else None
+        err = ""
+        try:
+            err = self.proc.stderr.read().decode("utf-8", "replace") if self.proc and self.proc.stderr else ""
+        except Exception:
+            pass
         self.stop()
+        if not IS_WIN and (rc in (126, 127) or "cancel" in err.lower()):
+            return self.say("Не получены права администратора (окно пароля закрыто или недоступно).", err=True)
         self.say("Ядро остановилось, подробности в логе.", err=True)
         self.toggle_log(True)
 
     def stop(self):
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(5)
-            except Exception:
-                self.proc.kill()
+        stop_core(self.proc)
         self.proc = None
         self.state = "off"
         self.active = ""
@@ -1432,7 +1662,7 @@ class App(tk.Tk):
 
     def poll_current(self):
         """Ask the core which server auto mode is on (off the UI thread; at most one request in flight)."""
-        if self.polling or self.state != "on" or not self.api:
+        if self.polling or self.state not in ("connecting", "on") or not self.api:
             return
         self.polling = True
         api = self.api
@@ -1444,8 +1674,13 @@ class App(tk.Tk):
 
     def got_current(self, now, api):
         self.polling = False
-        if api != self.api or self.state != "on" or not now:  # stale answer or core gone
+        if api != self.api or self.state not in ("connecting", "on") or not now:  # stale answer or core gone
             return
+        if self.state == "connecting":  # the core answers its API: it is really up
+            self.state = "on"
+            self.t0 = time.time()
+            self.say("")
+            self.refresh_power()
         if now != self.current:
             self.current = now
             self.mark_live(now)
@@ -1458,11 +1693,20 @@ class App(tk.Tk):
             self.refresh_power()
         if self.n % 2 == 0:
             self.tail()
-        if self.n % 4 == 0:  # every 2 s: which server is auto mode on now
+        if self.n % 4 == 0 or self.state == "connecting":  # which server is auto mode on now (and: is the core up yet)
             self.poll_current()
+        if self.state == "connecting" and self.proc and self.proc.poll() is None:
+            # Fallback if the local API never answers: treat a core that stays alive as connected.
+            if time.time() - self.t_conn > (20 if IS_WIN else 150):
+                self.state = "on"
+                self.t0 = time.time()
+                self.say("")
+                self.refresh_power()
         if self.n % 120 == 0:  # every minute
             self.refresh_due()
             self.update_rules_due()
+        if self.n % 43200 == 0 and self.cfg.get("auto_update"):  # every 6 hours
+            self.update_check()
         if self.proc and self.proc.poll() is not None and self.state != "off":
             self.fail()
         self._tick_id = self.after(500, self.tick)
@@ -1488,6 +1732,10 @@ class App(tk.Tk):
         if p and p.poll() is None:
             p.kill()
         self.stop()
+        if self.cfg.get("auto_update") and self.frozen():
+            info = updater.staged(UPDATE_DIR)  # a downloaded update installs while the program is closed
+            if info:
+                updater.apply_staged(info, relaunch=False)
         self.destroy()
 
     def destroy(self):
@@ -1499,20 +1747,59 @@ class App(tk.Tk):
         super().destroy()
 
 
-if __name__ == "__main__":
+def already_running():
+    """True if another copy of the app holds the single-instance lock (a named mutex on Windows, flock elsewhere)."""
+    global _LOCK
+    if IS_WIN:
+        _LOCK = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\FimaVPN-single-instance")
+        return ctypes.windll.kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
+    import fcntl
+    _LOCK = open(os.path.join(DATA, "app.lock"), "w")
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except Exception:
-        pass
+        fcntl.flock(_LOCK, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except OSError:
+        return True
+
+
+_LOCK = None
+
+
+def apply_pending_update():
+    """At start: if automatic updates are on and a verified newer version is waiting, install it and restart."""
+    try:
+        if not getattr(sys, "frozen", False):
+            return False
+        with open(SETTINGS, encoding="utf-8-sig") as f:
+            if not json.load(f).get("auto_update"):
+                return False
+        info = updater.staged(UPDATE_DIR)
+        return bool(info) and updater.apply_staged(info, relaunch=True)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+if __name__ == "__main__":
+    if IS_WIN:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
     sys.excepthook = log_crash
     threading.excepthook = lambda a: log_crash(a.exc_type, a.exc_value, a.exc_traceback)
-    _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\FimaVPN-single-instance")
-    if ctypes.windll.kernel32.GetLastError() == 183 and "--selftest" not in sys.argv:  # ERROR_ALREADY_EXISTS
-        ctypes.windll.user32.MessageBoxW(0, "Приложение уже запущено.", TITLE, 0x40)
+    if "--selftest" not in sys.argv and already_running():
+        if IS_WIN:
+            ctypes.windll.user32.MessageBoxW(0, "Приложение уже запущено.", TITLE, 0x40)
+        else:
+            _r = tk.Tk()
+            _r.withdraw()
+            messagebox.showinfo(TITLE, "Приложение уже запущено.")
         sys.exit(0)
     if "--selftest" in sys.argv:
         outs = parse_text(sys.stdin.read())
         json.dump(build_config(outs, "AUTO", True, ["example.com"]), open(RUNCFG, "w"), indent=1)
         print(len(outs), "outbounds")
         sys.exit(0)
+    if apply_pending_update():
+        sys.exit(0)  # the helper swaps the files after we exit and starts the new version
     App().mainloop()
