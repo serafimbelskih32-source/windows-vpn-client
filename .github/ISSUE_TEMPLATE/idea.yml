@@ -1,0 +1,21 @@
+name: Идея или пожелание
+description: Чего не хватает в программе
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: Что добавить или изменить
+      description: Опиши, что хочется, и зачем это нужно.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Для какой системы
+      multiple: true
+      options:
+        - Windows
+        - Linux
+        - macOS
+        - Для всех

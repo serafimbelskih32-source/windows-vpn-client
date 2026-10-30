@@ -1,0 +1,36 @@
+name: Что-то не работает
+description: Расскажи, что случилось, и я разберусь
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: os
+    attributes:
+      label: Система
+      options:
+        - Windows 10 / 11
+        - Linux x86_64
+        - Linux ARM64
+        - macOS Apple Silicon
+        - macOS Intel
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Версия программы
+      description: Номер написан внизу окна справа, например v1.2.0.
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: Что случилось
+      description: Что ты нажимал, что ожидал увидеть и что увидел на самом деле.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Текст из раздела «Лог»
+      description: Раздел «Лог» находится внизу окна. Перед отправкой убери из текста ссылки-подписки и ключи: они работают как пароль.
+      render: text

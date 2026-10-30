@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VPN-клиент для Windows, Linux и macOS</title>
+<meta name="description" content="Вставил подписку, выбрал сервер, нажал кнопку. Простой бесплатный VPN-клиент с открытым кодом для Windows, Linux и macOS.">
+<meta property="og:title" content="VPN-клиент для Windows, Linux и macOS">
+<meta property="og:description" content="Вставил подписку. Выбрал сервер. Нажал кнопку.">
+<meta property="og:image" content="https://serafimbelskih32-source.github.io/windows-vpn-client/social-preview.png">
+<link rel="icon" href="icon.png">
+<style>
+  :root {
+    --bg: #E3E5E8; --paper: #F6F7F8; --ink: #12151B; --blue: #1E3CFF; --mute: #555C67; --on-blue: #fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0F1217; --paper: #181C24; --ink: #E8EAED; --blue: #4D66FF; --mute: #9AA3AF; }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink); line-height: 1.55; font-size: 17px;
+    font-family: Bahnschrift, "DIN Alternate", "Arial Narrow", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  a { color: inherit; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 20px; }
+  header { display: flex; align-items: center; gap: 12px; padding: 22px 0; }
+  header img { width: 36px; height: 36px; }
+  header b { font-size: 22px; letter-spacing: .01em; }
+  header nav { margin-left: auto; display: flex; gap: 22px; font-size: 16px; }
+  header nav a { text-decoration: none; color: var(--mute); }
+  header nav a:hover { color: var(--ink); text-decoration: underline; }
+
+  h1 { font-size: clamp(38px, 6.2vw, 68px); line-height: 1.02; margin: 0 0 18px; font-weight: 800; letter-spacing: -.01em; }
+  h2 { font-size: 30px; margin: 0 0 18px; font-weight: 800; }
+  p { margin: 0 0 14px; }
+  .lead { font-size: 20px; color: var(--mute); max-width: 30em; }
+
+  .hero { display: grid; grid-template-columns: 1.15fr .85fr; gap: 44px; align-items: center; padding: 28px 0 64px; }
+  .hero img { width: 100%; max-width: 330px; justify-self: center; border: 3px solid var(--ink); box-shadow: 10px 10px 0 var(--ink); }
+
+  .btn {
+    display: inline-flex; flex-direction: column; justify-content: center; gap: 2px; text-decoration: none;
+    background: var(--paper); color: var(--ink); border: 3px solid var(--ink); padding: 14px 20px 13px;
+    box-shadow: 7px 7px 0 var(--ink); transition: transform .08s, box-shadow .08s; min-width: 0;
+  }
+  .btn:hover { transform: translate(4px, 4px); box-shadow: 3px 3px 0 var(--ink); }
+  .btn:active { transform: translate(7px, 7px); box-shadow: 0 0 0 var(--ink); }
+  .btn:focus-visible, summary:focus-visible, a:focus-visible { outline: 3px solid var(--blue); outline-offset: 4px; }
+  .btn b { font-size: 21px; line-height: 1.15; }
+  .btn small { font-size: 14px; color: var(--mute); }
+  .btn.primary { background: var(--blue); color: var(--on-blue); padding: 20px 30px 19px; }
+  .btn.primary b { font-size: 28px; }
+  .btn.primary small { color: rgba(255,255,255,.82); font-size: 15px; }
+  .cta-note { margin-top: 22px; font-size: 15px; color: var(--mute); max-width: 32em; }
+  #mobile { display: none; border: 3px solid var(--ink); background: var(--paper); padding: 14px 18px; max-width: 28em; }
+
+  section { padding: 54px 0; border-top: 3px solid var(--ink); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 26px; margin-top: 8px; }
+
+  ol.steps { list-style: none; counter-reset: s; margin: 0; padding: 0; display: grid; gap: 18px; }
+  ol.steps li { counter-increment: s; display: grid; grid-template-columns: 54px 1fr; gap: 18px; align-items: start;
+    background: var(--paper); border: 3px solid var(--ink); padding: 16px 20px; }
+  ol.steps li::before { content: counter(s); background: var(--blue); color: var(--on-blue); font-weight: 800; font-size: 26px;
+    width: 54px; height: 54px; display: grid; place-items: center; }
+  ol.steps b { display: block; font-size: 20px; }
+  ol.steps span { color: var(--mute); }
+
+  .feats { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 22px; }
+  .feat { background: var(--paper); border: 3px solid var(--ink); padding: 18px 20px; }
+  .feat b { display: block; font-size: 19px; margin-bottom: 4px; }
+  .feat span { color: var(--mute); font-size: 16px; }
+  .feat.wide { grid-column: 1 / -1; border-left: 12px solid var(--blue); }
+
+  .shots { display: flex; gap: 34px; flex-wrap: wrap; justify-content: center; align-items: flex-start; }
+  .shots figure { margin: 0; max-width: 330px; }
+  .shots img { width: 100%; display: block; border: 3px solid var(--ink); box-shadow: 8px 8px 0 var(--ink); }
+  .shots figcaption { margin-top: 16px; color: var(--mute); font-size: 15px; }
+
+  details { background: var(--paper); border: 3px solid var(--ink); margin-bottom: 14px; }
+  summary { cursor: pointer; padding: 15px 20px; font-weight: 800; font-size: 18px; }
+  details[open] summary { border-bottom: 3px solid var(--ink); }
+  details div { padding: 14px 20px 6px; }
+  code { background: var(--bg); padding: 1px 6px; border: 1px solid var(--mute); font-size: .92em; }
+
+  footer { border-top: 3px solid var(--ink); padding: 30px 0 60px; color: var(--mute); font-size: 15px; display: flex; flex-wrap: wrap; gap: 8px 26px; }
+  footer a { color: var(--ink); }
+
+  @media (max-width: 800px) {
+    .hero { grid-template-columns: 1fr; gap: 34px; padding-bottom: 44px; }
+    header nav { display: none; }
+    .btn.primary { width: 100%; }
+    .btn { box-shadow: 5px 5px 0 var(--ink); }
+    ol.steps li { grid-template-columns: 46px 1fr; padding: 14px; }
+    ol.steps li::before { width: 46px; height: 46px; font-size: 22px; }
+  }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .btn { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <img src="icon.png" alt="" width="36" height="36">
+    <b>VPN-клиент</b>
+    <nav>
+      <a href="#download">Скачать</a>
+      <a href="#start">Как начать</a>
+      <a href="#features">Что умеет</a>
+      <a href="#faq">Вопросы</a>
+      <a href="https://github.com/serafimbelskih32-source/windows-vpn-client">GitHub</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <div>
+      <h1>Вставил подписку. Выбрал сервер. Нажал кнопку.</h1>
+      <p class="lead">Простой VPN-клиент для Windows, Linux и macOS. Бесплатный, с открытым кодом. Ничего устанавливать не нужно: скачал и запустил.</p>
+      <p><a class="btn primary" id="cta" href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN.exe">
+        <b id="cta-title">Скачать для Windows</b><small id="cta-sub">FimaVPN.exe, Windows 10 и 11</small></a></p>
+      <p id="mobile">Это программа для компьютеров. Открой эту страницу на компьютере, чтобы скачать её.</p>
+      <p class="cta-note">Программа не продаёт и не выдаёт VPN: она подключается к серверам, ссылку на которые у тебя уже есть от провайдера или от твоего собственного сервера.</p>
+    </div>
+    <img src="screenshot.png" alt="Окно программы: большая кнопка подключения и список серверов с флагами, пингом и скоростью">
+  </div>
+</div>
+
+<section id="download"><div class="wrap">
+  <h2>Скачать для любой системы</h2>
+  <div class="grid">
+    <a class="btn" href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN.exe"><b>Windows</b><small>10 и 11</small></a>
+    <a class="btn" href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN-linux-x86_64"><b>Linux</b><small>x86_64</small></a>
+    <a class="btn" href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN-linux-arm64"><b>Linux</b><small>ARM64</small></a>
+    <a class="btn" href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN-macos-arm64.zip"><b>macOS</b><small>Apple Silicon (M1 и новее)</small></a>
+    <a class="btn" href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN-macos-x86_64.zip"><b>macOS</b><small>Intel</small></a>
+  </div>
+  <p class="cta-note" style="margin-top:26px">Версии для Linux и macOS новые: они собираются и проходят автоматические проверки, но на настоящих компьютерах проверены меньше, чем версия для Windows. Если что-то не работает, <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/issues/new/choose">расскажи об этом</a>. Контрольные суммы лежат на <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest">странице релиза</a>.</p>
+</div></section>
+
+<section id="start"><div class="wrap">
+  <h2>Как начать</h2>
+  <ol class="steps">
+    <li><div><b>Запусти программу</b><span>Windows спросит права администратора, чтобы создать виртуальный сетевой адаптер: нажми «Да». На Linux и macOS пароль попросят позже, в момент подключения.</span></div></li>
+    <li><div><b>Вставь подписку</b><span>Скопируй ссылку, которую выдал провайдер, и нажми «Вставить». Подойдут и отдельные ключи: <code>vless://</code>, <code>vmess://</code>, <code>trojan://</code>, <code>ss://</code>, <code>hysteria2://</code>, <code>tuic://</code>.</span></div></li>
+    <li><div><b>Выбери сервер</b><span>«Быстрейший из списка» подберёт его сам и будет переключаться, если сервер станет хуже. Или нажми «Тест скорости» и выбери лучший вручную.</span></div></li>
+    <li><div><b>Нажми «Подключить»</b><span>Большая кнопка станет синей, рядом пойдёт таймер. Чтобы выключить, нажми её ещё раз.</span></div></li>
+  </ol>
+</div></section>
+
+<section id="features"><div class="wrap">
+  <h2>Что умеет</h2>
+  <div class="feats">
+    <div class="feat wide"><b>Показывает, к какому серверу подключён</b><span>В режиме «Быстрейший из списка» на большой кнопке написано «Авто: Германия» с флагом, а строка в списке выделена синим. Если автовыбор переключился, надпись меняется.</span></div>
+    <div class="feat"><b>Любые протоколы</b><span>VLESS (Reality, gRPC, WebSocket), VMess, Trojan, Shadowsocks, Hysteria2, TUIC.</span></div>
+    <div class="feat"><b>Честный тест серверов</b><span>Пинг, скорость и реальная страна выхода у каждого сервера. Тест идёт мимо любого включённого VPN.</span></div>
+    <div class="feat"><b>Российские сайты без VPN</b><span>Российские сервисы идут напрямую, остальное через VPN. Списки обновляются раз в неделю.</span></div>
+    <div class="feat"><b>Подписки обновляются сами</b><span>По интервалу, который сообщает провайдер. Если провайдер недоступен, остаются последние серверы.</span></div>
+    <div class="feat"><b>Минимализм по желанию</b><span>Флаги, пинг и скорость отключаются по отдельности в «Настройках». Что выключено, то не измеряется.</span></div>
+    <div class="feat"><b>Значок в трее</b><span>Серый значок: VPN выключен, синий: подключён. Меню: показать окно, подключить, выход.</span></div>
+    <div class="feat"><b>Автообновление</b><span>Новая версия скачивается с GitHub, проверяется по контрольной сумме и ставится при следующем запуске. Можно выключить.</span></div>
+    <div class="feat"><b>Не ломает сеть</b><span>Если окно закрыто аварийно, ядро VPN завершается вместе с ним и интернет не пропадает.</span></div>
+  </div>
+</div></section>
+
+<section><div class="wrap">
+  <h2>Полный вид и минималистичный</h2>
+  <div class="shots">
+    <figure><img src="screenshot.png" alt="Полный вид: флаги, пинг, скорость" loading="lazy"><figcaption>Полный вид: флаги, пинг, скорость и протокол.</figcaption></figure>
+    <figure><img src="screenshot-minimal.png" alt="Минималистичный вид: только названия" loading="lazy"><figcaption>Минималистичный вид: всё лишнее выключено в «Настройках».</figcaption></figure>
+  </div>
+</div></section>
+
+<section id="faq"><div class="wrap">
+  <h2>Частые вопросы</h2>
+  <details><summary>Windows пишет «Система Windows защитила ваш компьютер»</summary><div><p>Программа не подписана платным сертификатом, поэтому SmartScreen и некоторые антивирусы настораживаются. Нажми «Подробнее», затем «Выполнить в любом случае». Если не доверяешь готовому файлу, собери его сам из исходников: весь код открыт.</p></div></details>
+  <details><summary>macOS пишет, что программу нельзя открыть</summary><div><p>Нажми на неё правой кнопкой, выбери «Открыть» и подтвердите. Один раз этого достаточно. Либо в терминале: <code>xattr -dr com.apple.quarantine FimaVPN.app</code>.</p></div></details>
+  <details><summary>На Linux не появляется окно пароля</summary><div><p>Нужен <code>pkexec</code> (пакет <code>polkit</code>) и запущенный графический агент polkit: в обычных рабочих окружениях (GNOME, KDE, XFCE) он есть. Ядру VPN нужны права, чтобы создать сетевой адаптер.</p></div></details>
+  <details><summary>Не подключается</summary><div><p>Открой раздел «Лог» внизу окна: там причина. Частые причины: подписка устарела (проверь её в кабинете провайдера), запущен другой VPN (выключи его), на Windows нет прав администратора.</p></div></details>
+  <details><summary>Где взять подписку?</summary><div><p>У VPN-провайдера или на собственном сервере: панели 3x-ui, Marzban и Remnawave выдают такие ссылки. Ссылка-подписка работает как пароль: не публикуй её.</p></div></details>
+  <details><summary>Когда приходит обновление?</summary><div><p>Программа сама проверяет GitHub при запуске и раз в несколько часов, скачивает новую версию, проверяет её контрольную сумму и ставит при следующем запуске или закрытии. Если нужно сразу, нажми «Проверить» в «Настройках».</p></div></details>
+</div></section>
+
+<div class="wrap">
+  <footer>
+    <span>Код под лицензией MIT. Внутри работает ядро <a href="https://github.com/SagerNet/sing-box">sing-box</a> (GPL-3.0).</span>
+    <a href="https://github.com/serafimbelskih32-source/windows-vpn-client">Исходный код</a>
+    <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases">Все версии</a>
+    <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/issues/new/choose">Сообщить о проблеме</a>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var base = "https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/";
+  var ua = navigator.userAgent || "";
+  var plat = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "";
+  var touchSmall = navigator.maxTouchPoints > 1 && Math.min(screen.width, screen.height) < 900;
+  if (/Mobi|iPhone|iPad|Tablet/i.test(ua) || touchSmall) {
+    document.getElementById("cta").style.display = "none";
+    document.getElementById("mobile").style.display = "block";
+    return;
+  }
+  var arm = /arm|aarch/i.test(plat) || /aarch64|arm64/i.test(ua);
+  var pick = null;
+  if (/Mac/i.test(plat) || /Macintosh|Mac OS X/.test(ua)) {
+    // the browser cannot tell Apple Silicon from Intel reliably: offer Apple Silicon, the other one is in the list below
+    pick = { title: "Скачать для macOS", sub: "Apple Silicon (M1 и новее). Для Intel выбери ниже", file: "FimaVPN-macos-arm64.zip" };
+  } else if (/Linux|X11/i.test(plat + ua)) {
+    pick = arm ? { title: "Скачать для Linux", sub: "ARM64", file: "FimaVPN-linux-arm64" }
+               : { title: "Скачать для Linux", sub: "x86_64", file: "FimaVPN-linux-x86_64" };
+  }
+  if (pick) {
+    document.getElementById("cta").href = base + pick.file;
+    document.getElementById("cta-title").textContent = pick.title;
+    document.getElementById("cta-sub").textContent = pick.sub;
+  }
+})();
+</script>
+</body>
+</html>
