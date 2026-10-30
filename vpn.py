@@ -9,6 +9,7 @@ import json
 import os
 import queue
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -393,7 +394,8 @@ def merge_outs(groups):
 
 
 # ---------- config build ----------
-def build_config(outs, chosen, ru_direct, extra_direct):
+def build_config(outs, chosen, ru_direct, extra_direct, api=None):
+    """`api` = (port, secret): expose the core's local API so the window can show which server auto mode picked."""
     tags = [o["tag"] for o in outs]
     proxy_out = {"type": "selector", "tag": "proxy", "outbounds": tags, "default": chosen if chosen in tags else tags[0]}
     if chosen == "AUTO" and len(tags) > 1:
@@ -442,6 +444,8 @@ def build_config(outs, chosen, ru_direct, extra_direct):
     }
     if not rule_sets:
         del cfg["route"]["rule_set"]
+    if api:
+        cfg["experimental"] = {"clash_api": {"external_controller": f"127.0.0.1:{api[0]}", "secret": api[1]}}
     return cfg
 
 
@@ -688,6 +692,26 @@ def kill_stale_cores(own_pids=()):
     return len(pids)
 
 
+def free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def current_server(api):
+    """Tag of the server the 'proxy' group uses right now (in auto mode: the urltest pick), asked from the
+    core's local API. `api` = (port, secret). Returns None when the core does not answer."""
+    port, secret = api
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/proxies/proxy", headers={"Authorization": f"Bearer {secret}"})
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=3) as r:
+            return json.load(r).get("now") or None
+    except Exception:
+        return None
+
+
 def resolve_servers(outs):
     """Replace server hostnames by IPs (keeping SNI), so the test needs no DNS at all: with a VPN up,
     DNS from another interface can be blocked by its strict_route."""
@@ -822,6 +846,9 @@ class App(tk.Tk):
         self.loading = False
         self.reload_pending = False
         self.rules_busy = False
+        self.api = None  # (port, secret) of the running core's local API
+        self.current = ""  # server the core is using right now
+        self.polling = False
         self.uiq = queue.Queue()  # callables from worker threads, run by pump() on the Tk thread
         self._pick = None  # row the app selected itself (see on_select)
         self._pump_id = self._tick_id = None
@@ -883,6 +910,7 @@ class App(tk.Tk):
         self.tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.tag_configure("live", foreground=BLUE, font=(fam, 11, "bold"))
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind("<Double-1>", lambda e: self.toggle() if self.state == "off" else None)
 
@@ -981,6 +1009,10 @@ class App(tk.Tk):
             s = int(time.time() - self.t0)
             clock = f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
         name = self.active if self.state != "off" else self.sel_name()
+        if self.state == "on" and self.current and self.chosen() == "AUTO":
+            name = f"Авто: {self.current}"  # the real server, not just the word "auto"
+        elif self.state == "on" and self.current:
+            name = self.current
         self.power.set(self.state, name, clock, self.blink)
 
     def save(self, sources=True):
@@ -1099,6 +1131,8 @@ class App(tk.Tk):
         else:
             self.tree.yview_moveto(top)
         self.count.config(text=str(len(outs)))
+        if self.state == "on" and self.current:
+            self.mark_live(self.current)  # the list was rebuilt: keep the live row marked
         self.save(sources=manual)
 
     def note_subs(self):
@@ -1340,7 +1374,9 @@ class App(tk.Tk):
                 TITLE, "Запущен другой VPN-клиент (Karing / v2rayN / Hiddify / NekoRay).\n"
                      "Два VPN сразу конфликтуют. Отключи его и нажми «Да», либо «Нет» для отмены."):
             return
-        cfg = build_config(self.outs, self.chosen(), self.ru.get(), self.extra.get().split())
+        self.api = (free_port(), secrets.token_hex(16))  # new secret per connection, loopback only
+        self.current = ""
+        cfg = build_config(self.outs, self.chosen(), self.ru.get(), self.extra.get().split(), self.api)
         json.dump(cfg, open(RUNCFG, "w", encoding="utf-8"), indent=1)
         open(LOGFILE, "w").close()
         self._pos = 0
@@ -1383,7 +1419,37 @@ class App(tk.Tk):
         self.proc = None
         self.state = "off"
         self.active = ""
+        self.current = ""
+        self.api = None
+        self.mark_live("")
         self.refresh_power()
+
+    def mark_live(self, tag):
+        """Blue bold row = the server the connection is using right now."""
+        for iid in self.tree.get_children():
+            live = iid != "auto" and bool(tag) and self.outs[int(iid)]["tag"] == tag
+            self.tree.item(iid, tags=("live",) if live else ())
+
+    def poll_current(self):
+        """Ask the core which server auto mode is on (off the UI thread; at most one request in flight)."""
+        if self.polling or self.state != "on" or not self.api:
+            return
+        self.polling = True
+        api = self.api
+
+        def work():
+            now = current_server(api)
+            self._ui(lambda: self.got_current(now, api))
+        threading.Thread(target=work, daemon=True).start()
+
+    def got_current(self, now, api):
+        self.polling = False
+        if api != self.api or self.state != "on" or not now:  # stale answer or core gone
+            return
+        if now != self.current:
+            self.current = now
+            self.mark_live(now)
+            self.refresh_power()
 
     def tick(self):
         self.n += 1
@@ -1392,6 +1458,8 @@ class App(tk.Tk):
             self.refresh_power()
         if self.n % 2 == 0:
             self.tail()
+        if self.n % 4 == 0:  # every 2 s: which server is auto mode on now
+            self.poll_current()
         if self.n % 120 == 0:  # every minute
             self.refresh_due()
             self.update_rules_due()
