@@ -1296,10 +1296,10 @@ class App(tk.Tk):
         with_speed = [i for i in alive if res(i)[1] is not None and res(i)[1] >= 0]
         best = max(with_speed, key=lambda i: res(i)[1]) if with_speed else min(alive, key=lambda i: res(i)[0])
 
+        # The test only reorders rows and reports. It never changes what the user picked: with «Быстрейший из списка»
+        # selected, connecting must still switch servers by itself, not pin the connection to one of them.
         self.sort_rows()
-        self.cfg["chosen"] = self.outs[best]["tag"]
-        self.select(str(best))
-        self.tree.see(str(best))
+        self.tree.yview_moveto(0)
         p, sp = res(best)
         what = f"{fmt_speed(sp)}, {fmt_ping(p)}" if sp is not None and sp >= 0 else fmt_ping(p)
         if with_speed:
@@ -1307,7 +1307,10 @@ class App(tk.Tk):
             if skipped:
                 what += f"; у {skipped} серверов скорость не замерилась"
         src = f" Скорость измерена загрузкой с {self.speed_host}." if getattr(self, "speed_host", "") else ""
-        self.say(f"Выбран самый быстрый: {self.outs[best]['tag']} ({what}).{src}")
+        hint = ("«Быстрейший из списка» сам выберет лучший по отклику и будет переключаться. "
+                "Чтобы подключаться только к одному серверу, выбери его в списке."
+                if self.tree.selection() and self.tree.selection()[0] == "auto" else "")
+        self.say(f"Самый быстрый: {self.outs[best]['tag']} ({what}).{src} {hint}".strip())
 
     def sort_rows(self):
         """Measured speed (desc), then ping (asc), unreachable and untested last; "auto" stays on top."""
