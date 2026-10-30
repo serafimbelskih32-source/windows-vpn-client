@@ -3,10 +3,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest"><img alt="Последняя версия" src="https://img.shields.io/github/v/release/serafimbelskih32-source/windows-vpn-client?style=flat-square&color=1E3CFF&label=версия"></a>
-  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases"><img alt="Скачиваний" src="https://img.shields.io/github/downloads/serafimbelskih32-source/windows-vpn-client/total?style=flat-square&color=12151B&label=скачано"></a>
-  <img alt="Системы" src="https://img.shields.io/badge/системы-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-555C67?style=flat-square">
-  <a href="LICENSE"><img alt="Лицензия" src="https://img.shields.io/badge/лицензия-MIT-555C67?style=flat-square"></a>
+  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest"><img alt="Последняя версия" src="https://img.shields.io/github/v/release/serafimbelskih32-source/windows-vpn-client?style=flat-square&color=1E3CFF&label=%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F"></a>
+  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases"><img alt="Скачиваний" src="https://img.shields.io/github/downloads/serafimbelskih32-source/windows-vpn-client/total?style=flat-square&color=12151B&label=%D1%81%D0%BA%D0%B0%D1%87%D0%B0%D0%BD%D0%BE"></a>
+  <img alt="Системы" src="https://img.shields.io/badge/%D1%81%D0%B8%D1%81%D1%82%D0%B5%D0%BC%D1%8B-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-555C67?style=flat-square">
+  <a href="LICENSE"><img alt="Лицензия" src="https://img.shields.io/badge/%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F-MIT-555C67?style=flat-square"></a>
 </p>
 
 Простой VPN-клиент: вставляешь ссылку-подписку от своего VPN-провайдера, выбираешь сервер и нажимаешь одну кнопку. Весь трафик компьютера идёт через VPN. Устанавливать ничего не нужно: скачал и запустил.
