@@ -55,6 +55,7 @@ LOGFILE = os.path.join(DATA, "sing-box.log")
 TESTCFG = os.path.join(DATA, "test.json")
 TESTLOG = os.path.join(DATA, "test.log")
 SUBCACHE = os.path.join(DATA, "subs.json")
+EXITFILE = os.path.join(DATA, "exit.json")  # "server:port" -> country the server really exits to (found by the test)
 RULES_DIR = os.path.join(DATA, "rules")
 os.makedirs(DATA, exist_ok=True)
 
@@ -614,7 +615,8 @@ class Check(tk.Frame):
 
 class FlagImages:
     """Tk images of the flat flags (see flags.py), made on first use, one per country, and kept alive here."""
-    def __init__(self):
+    def __init__(self, master):
+        self.master = master  # images belong to this window's Tk, not to whichever root was created first
         self.cache = {}
 
     def get(self, code):
@@ -622,7 +624,7 @@ class FlagImages:
         img = self.cache.get(code)
         if img is None:
             w, h = P(24), P(16)
-            img = tk.PhotoImage(width=w + P(9), height=h)  # the extra right margin stays transparent: a gap before the text
+            img = tk.PhotoImage(master=self.master, width=w + P(9), height=h)  # transparent right margin = gap before the text
             img.put(flags.to_tk_data(flags.render(code, w, h, max(1, P(1)))))
             self.cache[code] = img
         return img
@@ -710,6 +712,8 @@ SPEED_URLS = ("https://speed.cloudflare.com/__down?bytes=50000000",
 UA_BROWSER = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
               "Chrome/124.0.0.0 Safari/537.36")
 PING_URL = "https://www.gstatic.com/generate_204"
+# Cloudflare answers with the country it sees the request come from: through a server that is its real exit country.
+EXIT_URLS = ("https://www.cloudflare.com/cdn-cgi/trace", "https://1.1.1.1/cdn-cgi/trace")
 TOP_FOR_SPEED = 8
 
 
@@ -942,6 +946,25 @@ def probe_ping(port):
     return best
 
 
+def probe_exit(port, urls=None):
+    """Two-letter country code where the server really exits to the internet, as Cloudflare sees it, else None.
+    A server's name says where the provider claims it is; behind a CDN it can be anywhere."""
+    for url in (urls or EXIT_URLS):
+        try:
+            with _opener(port).open(url, timeout=6) as r:
+                m = re.search(r"^loc=([A-Za-z]{2})\s*$", r.read(4096).decode("utf-8", "replace"), re.M)
+        except Exception:
+            continue
+        if m and m.group(1).upper() != "XX":  # XX = unknown
+            return m.group(1).upper()
+    return None
+
+
+def okey(o):
+    """Stable identity of a server across subscription updates (names change, the address does not)."""
+    return f"{o.get('server')}:{o.get('server_port')}"
+
+
 def probe_speed(port, secs=4.0, urls=None):
     """Download throughput through the server: (Mbit/s, url that answered), or (None, None).
     Measured from the first bytes for up to `secs` seconds; `urls` is tried in order."""
@@ -1019,7 +1042,7 @@ class App(tk.Tk):
         self.polling = False
         self.t_conn = 0.0  # when the last connect started
         self.uiq = queue.Queue()  # callables from worker threads, run by pump() on the Tk thread
-        self.flagimgs = FlagImages()
+        self.flagimgs = FlagImages(self)
         self._pick = None  # row the app selected itself (see on_select)
         self._pump_id = self._tick_id = None
         self.state = "off"
@@ -1038,6 +1061,11 @@ class App(tk.Tk):
             pass
         try:
             self.subs = json.load(open(SUBCACHE, encoding="utf-8"))
+        except Exception:
+            pass
+        self.exit_cc = {}  # server -> real exit country, learned by the speed test and kept between runs
+        try:
+            self.exit_cc = {k: v for k, v in json.load(open(EXITFILE, encoding="utf-8")).items() if isinstance(v, str)}
         except Exception:
             pass
 
@@ -1270,6 +1298,28 @@ class App(tk.Tk):
             return ""
         return AUTO_LABEL if sel[0] == "auto" else self.outs[int(sel[0])]["tag"]
 
+    def flag_code(self, o):
+        """Flag of a server: the country it really exits to once the test has found it, else what its name says."""
+        cc = self.exit_cc.get(okey(o))
+        if cc:
+            return cc if cc in flags.FLAGS else "??"  # a real country without a drawing: neutral tile, never a wrong flag
+        return flags.code_for(o["tag"])
+
+    def flag_for_tag(self, tag):
+        o = next((o for o in self.outs if o["tag"] == tag), None)
+        return self.flagimgs.get(self.flag_code(o) if o else flags.code_for(tag))
+
+    def set_exit(self, i, cc):
+        """The test learned where server i really exits: redraw its row and, if connected to it, the main button."""
+        if not cc or i >= len(self.outs):
+            return
+        o = self.outs[i]
+        self.exit_cc[okey(o)] = cc
+        if self.tree.exists(str(i)):
+            self.tree.item(str(i), image=self.flagimgs.get(self.flag_code(o)))
+        if self.state != "off":
+            self.refresh_power()
+
     def refresh_power(self):
         clock = ""
         if self.state == "on":
@@ -1279,11 +1329,11 @@ class App(tk.Tk):
         if self.state == "on" and self.current:  # the server the core is really on (auto mode switches by itself)
             shown = flags.strip_flag(self.current)
             name = f"Авто: {shown}" if self.chosen() == "AUTO" else shown
-            flag = self.flagimgs.for_tag(self.current)
+            flag = self.flag_for_tag(self.current)
         elif label == AUTO_LABEL:
             name, flag = label, self.flagimgs.get("AUTO")
         elif label:
-            name, flag = flags.strip_flag(label), self.flagimgs.for_tag(label)
+            name, flag = flags.strip_flag(label), self.flag_for_tag(label)
         else:
             name, flag = "", None
         self.power.set(self.state, name, clock, self.blink, flag)
@@ -1393,7 +1443,7 @@ class App(tk.Tk):
                              values=("", "", "AUTO"))
         for i, o in enumerate(outs):
             ping, speed = self.results.get(o["tag"], (None, None))
-            self.tree.insert("", "end", iid=str(i), text=flags.strip_flag(o["tag"]), image=self.flagimgs.for_tag(o["tag"]),
+            self.tree.insert("", "end", iid=str(i), text=flags.strip_flag(o["tag"]), image=self.flagimgs.get(self.flag_code(o)),
                              values=(fmt_ping(ping), fmt_speed(speed), PROTO.get(o["type"], o["type"].upper())))
         if self.results:
             self.sort_rows()
@@ -1504,6 +1554,12 @@ class App(tk.Tk):
         self._pick = iid
         self.tree.selection_set(iid)
 
+    def _probe(self, i):
+        """One server of the test: response time, and (if it answered) the country it really exits to."""
+        port = TEST_BASE_PORT + i
+        ms = probe_ping(port)
+        return ms, (probe_exit(port) if ms is not None and not self.test_stop.is_set() else None)
+
     def _cell(self, i, ping=None, speed=None):
         tag = self.outs[i]["tag"] if i < len(self.outs) else None
         if tag is None:
@@ -1550,18 +1606,18 @@ class App(tk.Tk):
             pings = {}
             done = 0
             with ThreadPoolExecutor(8) as ex:
-                futs = {ex.submit(lambda i=i: None if self.test_stop.is_set() else probe_ping(TEST_BASE_PORT + i)): i
+                futs = {ex.submit(lambda i=i: (None, None) if self.test_stop.is_set() else self._probe(i)): i
                         for i in range(len(outs))}
                 for f in as_completed(futs):
                     i = futs[f]
-                    ms = f.result()
+                    ms, cc = f.result()
                     done += 1
                     if ms is None and self.test_stop.is_set():
                         continue  # skipped after Stop, leave the row untested
                     pings[i] = ms
                     shown = -1 if ms is None else ms
-                    self._ui(lambda i=i, shown=shown, d=done: (self._cell(i, ping=shown),
-                                                               self.count.config(text=f"Пинг {d}/{len(outs)}")))
+                    self._ui(lambda i=i, shown=shown, cc=cc, d=done: (self._cell(i, ping=shown), self.set_exit(i, cc),
+                                                                      self.count.config(text=f"Пинг {d}/{len(outs)}")))
             top = sorted((i for i, ms in pings.items() if ms is not None), key=lambda i: pings[i])[:TOP_FOR_SPEED]
             urls = list(SPEED_URLS)  # one source for the whole run so servers are compared on equal terms
             self.speed_host = ""
@@ -1620,7 +1676,13 @@ class App(tk.Tk):
         hint = ("«Быстрейший из списка» сам выберет лучший по отклику и будет переключаться. "
                 "Чтобы подключаться только к одному серверу, выбери его в списке."
                 if self.tree.selection() and self.tree.selection()[0] == "auto" else "")
-        self.say(f"Самый быстрый: {flags.strip_flag(self.outs[best]['tag'])} ({what}).{src} {hint}".strip())
+        try:
+            write_json(EXITFILE, self.exit_cc)
+        except OSError:
+            pass
+        wrong = sum(1 for o in self.outs if self.exit_cc.get(okey(o)) and flags.code_for(o["tag"]) not in ("??", self.exit_cc[okey(o)]))
+        note = f" У {wrong} серверов страна в названии не совпала с реальным выходом: флаг показан по выходу." if wrong else ""
+        self.say(f"Самый быстрый: {flags.strip_flag(self.outs[best]['tag'])} ({what}).{src}{note} {hint}".strip())
 
     def sort_rows(self):
         """Measured speed (desc), then ping (asc), unreachable and untested last; "auto" stays on top."""
