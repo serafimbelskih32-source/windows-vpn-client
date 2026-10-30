@@ -852,7 +852,8 @@ class App(tk.Tk):
 
         self.power = Power(root, self.toggle, fam)
         self.power.pack(fill="x")
-        self.status = tk.Label(root, text="", font=self.f_s, bg=BG, fg=MUTE, anchor="w")
+        self.status = tk.Label(root, text="", font=self.f_s, bg=BG, fg=MUTE, anchor="w", justify="left",
+                               wraplength=P(430))
         self.status.pack(fill="x", pady=(P(6), 0))
 
         # servers
@@ -926,8 +927,7 @@ class App(tk.Tk):
             try:
                 n = kill_stale_cores({p.pid for p in (self.proc, self.test_proc) if p})
                 if n:
-                    self._ui(lambda: self.say("Закрыл ядро VPN от прошлого запуска: оно держало сеть, "
-                                              "хотя окно показывало «выключено»."))
+                    self._ui(lambda: self.say("Закрыл зависшее ядро VPN от прошлого запуска."))
             finally:
                 self.clean_done.set()
         threading.Thread(target=clean, daemon=True).start()
