@@ -431,7 +431,7 @@ def build_config(outs, chosen, ru_direct, extra_direct):
                             {"type": "udp", "tag": "local", "server": "77.88.8.8"}],
                 "rules": dns_rules, "final": "remote", "strategy": "ipv4_only"},
         "inbounds": [
-            {"type": "tun", "tag": "tun-in", "address": ["172.19.0.1/30"], "auto_route": True,
+            {"type": "tun", "tag": "tun-in", "interface_name": TUN_NAME, "address": ["172.19.0.1/30"], "auto_route": True,
              "strict_route": True, "stack": "mixed"},
             {"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": MIXED_PORT},
         ],
@@ -620,15 +620,58 @@ PING_URL = "https://www.gstatic.com/generate_204"
 TOP_FOR_SPEED = 8
 
 
-def build_test_config(outs):
-    """One local mixed inbound per server, each pinned to its server. No TUN, no admin needed."""
+TUN_NAME = "FimaTUN"
+
+
+def build_test_config(outs, nic=None):
+    """One local mixed inbound per server, each pinned to its server. No TUN, no admin needed.
+    `nic` = physical adapter name: bind outbound sockets to it so the test bypasses a running VPN."""
     inbounds = [{"type": "mixed", "tag": f"in{i}", "listen": "127.0.0.1", "listen_port": TEST_BASE_PORT + i}
                 for i in range(len(outs))]
     rules = [{"inbound": [f"in{i}"], "outbound": o["tag"]} for i, o in enumerate(outs)]
-    return {"log": {"level": "warn", "output": TESTLOG},
-            "dns": {"servers": [{"type": "udp", "tag": "local", "server": "77.88.8.8"}], "strategy": "ipv4_only"},
-            "inbounds": inbounds, "outbounds": outs + [{"type": "direct", "tag": "direct"}],
-            "route": {"rules": rules, "final": "direct", "default_domain_resolver": "local"}}
+    cfg = {"log": {"level": "warn", "output": TESTLOG},
+           "dns": {"servers": [{"type": "udp", "tag": "local", "server": "77.88.8.8"}], "strategy": "ipv4_only"},
+           "inbounds": inbounds, "outbounds": outs + [{"type": "direct", "tag": "direct"}],
+           "route": {"rules": rules, "final": "direct", "default_domain_resolver": "local"}}
+    if nic:
+        cfg["route"]["default_interface"] = nic
+    return cfg
+
+
+def physical_nic():
+    """Name of the real network adapter (lowest-metric IPv4 default route that is not our TUN), or None."""
+    ps = ("[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+          f"$r = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Where-Object {{ $_.InterfaceAlias -ne '{TUN_NAME}' }});"
+          "$p = @((Get-NetAdapter -Physical | Where-Object { $_.Status -eq 'Up' }).InterfaceIndex);"
+          "$c = @($r | Where-Object { $p -contains $_.InterfaceIndex }); if (-not $c) { $c = $r };"
+          "$c | Sort-Object { $_.RouteMetric + (Get-NetIPInterface -InterfaceIndex $_.InterfaceIndex "
+          "-AddressFamily IPv4).InterfaceMetric } | Select-Object -First 1 -ExpandProperty InterfaceAlias")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, timeout=20,
+                             creationflags=NOWIN).stdout.decode("utf-8", "replace").strip()
+        return out.splitlines()[0].strip() if out else None
+    except Exception:
+        return None
+
+
+def resolve_servers(outs):
+    """Replace server hostnames by IPs (keeping SNI), so the test needs no DNS at all: with a VPN up,
+    DNS from another interface can be blocked by its strict_route."""
+    res = []
+    for o in outs:
+        o = dict(o)
+        host = o.get("server", "")
+        if host and not re.match(r"^[\d.:]+$", host):
+            try:
+                ip = socket.getaddrinfo(host, o.get("server_port"), socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+            except OSError:
+                res.append(o)
+                continue
+            if isinstance(o.get("tls"), dict) and not o["tls"].get("server_name"):
+                o["tls"] = dict(o["tls"], server_name=host)
+            o["server"] = ip
+        res.append(o)
+    return res
 
 
 def _opener(port):
@@ -1049,8 +1092,6 @@ class App(tk.Tk):
             return self.test_btn.config(text="Останавливаю…")
         if not self.outs:
             return self.say("Сначала добавь подписку и нажми «Обновить».", err=True)
-        if self.state != "off":
-            return self.say("Отключи VPN перед тестом: иначе замер покажет не сами серверы.", err=True)
         self.testing = True
         self.test_stop.clear()
         self.test_btn.config(text="Остановить")
@@ -1097,7 +1138,11 @@ class App(tk.Tk):
     def _test_worker(self, outs):
         err = None
         try:
-            json.dump(build_test_config(outs), open(TESTCFG, "w", encoding="utf-8"), indent=1)
+            nic = physical_nic() if self.state != "off" else None  # VPN on: measure around it, not through it
+            if self.state != "off" and not nic:
+                raise RuntimeError("не нашёл сетевой адаптер для замера мимо VPN")
+            outs = resolve_servers(outs)
+            write_json(TESTCFG, build_test_config(outs, nic))
             open(TESTLOG, "w").close()
             chk = subprocess.run([CORE, "check", "-c", TESTCFG], capture_output=True, text=True, creationflags=NOWIN)
             if chk.returncode != 0:
