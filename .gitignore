@@ -1,0 +1,18 @@
+# secrets and personal data
+subscriptions.txt
+test_links.txt
+
+# core binaries are downloaded by build.ps1, not stored here
+core/sing-box.exe
+core/libcronet.dll
+core/LICENSE
+
+# build output and local tooling
+build/
+build_dl/
+dist/
+*.spec
+Lib/
+Scripts/
+__pycache__/
+icon_preview.png
