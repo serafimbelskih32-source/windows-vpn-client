@@ -19,7 +19,8 @@ import tkinter as tk
 from tkinter import font as tkfont
 import urllib.request
 from tkinter import messagebox, ttk
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse, urlsplit
+import http.client
 
 APP = "FimaVPN"  # settings folder name only
 TITLE = "VPN"
@@ -654,6 +655,34 @@ def physical_nic():
         return None
 
 
+def parse_stale(output, data_dir, own_pids):
+    """PIDs from 'pid|commandline' lines whose command line points into our data folder."""
+    pids = []
+    for line in output.splitlines():
+        pid, _, cmd = line.partition("|")
+        pid = pid.strip()
+        if pid.isdigit() and int(pid) not in own_pids and data_dir.lower() in cmd.lower():
+            pids.append(int(pid))
+    return pids
+
+
+def kill_stale_cores(own_pids=()):
+    """Stop sing-box processes started from our config folder by an earlier run of this app (the window was killed
+    or crashed). A leftover core keeps the TUN adapter and DNS capture alive while the window says 'off', so every
+    other program, including our own speed test, silently goes through it."""
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name='sing-box.exe'\" | "
+          "ForEach-Object { '{0}|{1}' -f $_.ProcessId, $_.CommandLine }")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, timeout=20,
+                             creationflags=NOWIN).stdout.decode("utf-8", "replace")
+    except Exception:
+        return 0
+    pids = parse_stale(out, DATA, set(own_pids))
+    for pid in pids:
+        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, creationflags=NOWIN)
+    return len(pids)
+
+
 def resolve_servers(outs):
     """Replace server hostnames by IPs (keeping SNI), so the test needs no DNS at all: with a VPN up,
     DNS from another interface can be blocked by its strict_route."""
@@ -680,17 +709,40 @@ def _opener(port):
 
 
 def probe_ping(port):
-    """Best of two https round trips through the server, in ms (None if unreachable)."""
+    """Response time through the server in ms, None if unreachable.
+
+    The first request opens the tunnel (TCP + TLS/REALITY/WebSocket + TLS to the site = several round trips)
+    and is only a warm-up. The number shown is the best of the next two requests on the SAME connection,
+    i.e. about one round trip to the server plus its hop to the site. Timing a cold connection instead made
+    every server look 3-6 times slower than it is."""
+    u = urlsplit(PING_URL)
+    try:
+        if u.scheme == "https":
+            c = http.client.HTTPSConnection("127.0.0.1", port, timeout=6)
+            c.set_tunnel(u.hostname, u.port or 443)
+            target = (u.path or "/") + (f"?{u.query}" if u.query else "")
+        else:
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=6)
+            target = PING_URL  # absolute URI: plain HTTP through a proxy
+    except Exception:
+        return None
     best = None
-    for _ in range(2):
-        t = time.perf_counter()
-        try:
-            with _opener(port).open(PING_URL, timeout=6) as r:
-                r.read()
-        except Exception:
-            continue
-        ms = (time.perf_counter() - t) * 1000
-        best = ms if best is None else min(best, ms)
+    try:
+        for i in range(3):
+            t = time.perf_counter()
+            try:
+                c.request("GET", target, headers={"Host": u.netloc, "Connection": "keep-alive"})
+                c.getresponse().read()
+            except Exception:
+                if i == 0:
+                    return None  # the tunnel never came up
+                c.close()  # connection dropped: try once more from scratch, but do not count the rebuild
+                continue
+            ms = (time.perf_counter() - t) * 1000
+            if i > 0:
+                best = ms if best is None else min(best, ms)
+    finally:
+        c.close()
     return best
 
 
@@ -868,6 +920,17 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.refresh_power()
         self.show_cached()
+        self.clean_done = threading.Event()
+
+        def clean():
+            try:
+                n = kill_stale_cores({p.pid for p in (self.proc, self.test_proc) if p})
+                if n:
+                    self._ui(lambda: self.say("Закрыл ядро VPN от прошлого запуска: оно держало сеть, "
+                                              "хотя окно показывало «выключено»."))
+            finally:
+                self.clean_done.set()
+        threading.Thread(target=clean, daemon=True).start()
         self._pump_id = self.after(50, self.pump)
         self.after(300, self.refresh_due)
         self._tick_id = self.after(500, self.tick)
@@ -1138,8 +1201,10 @@ class App(tk.Tk):
     def _test_worker(self, outs):
         err = None
         try:
-            nic = physical_nic() if self.state != "off" else None  # VPN on: measure around it, not through it
-            if self.state != "off" and not nic:
+            # Always measure around any tunnel (ours, a leftover core, Karing...), not through it: sockets are bound
+            # to the real adapter. Without a VPN this changes nothing, so no need to guess whether one is up.
+            nic = physical_nic()
+            if not nic and self.state != "off":
                 raise RuntimeError("не нашёл сетевой адаптер для замера мимо VPN")
             outs = resolve_servers(outs)
             write_json(TESTCFG, build_test_config(outs, nic))
@@ -1250,6 +1315,7 @@ class App(tk.Tk):
             return self.say("Сначала добавь подписку и нажми «Обновить».", err=True)
         if self.testing:
             return self.say("Идёт тест скорости. Дождись конца или остановь его.", err=True)
+        self.clean_done.wait(8)  # leftover cores from a previous run are being closed
         self.save()
         if karing_running() and not messagebox.askyesno(
                 TITLE, "Запущен другой VPN-клиент (Karing / v2rayN / Hiddify / NekoRay).\n"
