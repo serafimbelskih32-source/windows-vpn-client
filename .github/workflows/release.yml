@@ -73,6 +73,7 @@ jobs:
         shell: bash
         run: |
           python tests/test_updater.py
+          python tests/test_flags.py
           python tests/test_supervisor.py
           python vpn.py --selftest < tests/sample_links.txt
           if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python tests/gui_smoke.py; else python tests/gui_smoke.py; fi

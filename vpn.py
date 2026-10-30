@@ -25,8 +25,10 @@ from tkinter import messagebox, ttk
 from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 import http.client
 
+import flags
 import updater
 
+AUTO_LABEL = "Быстрейший из списка"
 APP = "FimaVPN"  # settings folder name only
 TITLE = "VPN"
 IS_WIN = sys.platform == "win32"
@@ -610,6 +612,25 @@ class Check(tk.Frame):
         self.box.config(text="✓" if on else "", bg=BLUE if on else PAPER, fg=WHITE)
 
 
+class FlagImages:
+    """Tk images of the flat flags (see flags.py), made on first use, one per country, and kept alive here."""
+    def __init__(self):
+        self.cache = {}
+
+    def get(self, code):
+        code = code if code in flags.FLAGS else "??"
+        img = self.cache.get(code)
+        if img is None:
+            w, h = P(24), P(16)
+            img = tk.PhotoImage(width=w + P(9), height=h)  # the extra right margin stays transparent: a gap before the text
+            img.put(flags.to_tk_data(flags.render(code, w, h, max(1, P(1)))))
+            self.cache[code] = img
+        return img
+
+    def for_tag(self, tag):
+        return self.get(flags.code_for(tag))
+
+
 class Power(tk.Canvas):
     """The one loud element: a slab with a hard shadow that presses in, fills blue when connected."""
     def __init__(self, master, command, fam):
@@ -618,6 +639,7 @@ class Power(tk.Canvas):
         self.command = command
         self.fam = fam
         self.state, self.server, self.clock = "off", "", ""
+        self.flag = None  # Tk image of the current server's flag
         self.blink, self.pressed, self.focused = True, False, False
         self.bind("<Configure>", lambda e: self.draw())
         self.bind("<ButtonPress-1>", self.down)
@@ -631,9 +653,9 @@ class Power(tk.Canvas):
         self.focused = v
         self.draw()
 
-    def set(self, state, server, clock, blink=True):
-        if (state, server, clock, blink) != (self.state, self.server, self.clock, self.blink):
-            self.state, self.server, self.clock, self.blink = state, server, clock, blink
+    def set(self, state, server, clock, blink=True, flag=None):
+        if (state, server, clock, blink, flag) != (self.state, self.server, self.clock, self.blink, self.flag):
+            self.state, self.server, self.clock, self.blink, self.flag = state, server, clock, blink, flag
             self.draw()
 
     def down(self, e):
@@ -664,7 +686,11 @@ class Power(tk.Canvas):
         if self.clock:
             self.create_text(x1 - P(22), d + P(40), text=self.clock, anchor="e", fill=fg, font=(MONO, FZ(16), "bold"))
         name = self.server if len(self.server) <= 40 else self.server[:39] + "…"
-        self.create_text(d + P(24), y1 - P(30), text=name, anchor="w", fill=sub, font=(self.fam, FZ(11)))
+        tx = d + P(24)
+        if self.flag is not None:
+            self.create_image(tx, y1 - P(30), image=self.flag, anchor="w")
+            tx += self.flag.width()  # includes the transparent gap
+        self.create_text(tx, y1 - P(30), text=name, anchor="w", fill=sub, font=(self.fam, FZ(11)))
         if self.focused:
             self.create_rectangle(d + P(10), d + P(10), x1 - P(8), y1 - P(8), outline=fg, dash=(3, 3))
 
@@ -993,6 +1019,7 @@ class App(tk.Tk):
         self.polling = False
         self.t_conn = 0.0  # when the last connect started
         self.uiq = queue.Queue()  # callables from worker threads, run by pump() on the Tk thread
+        self.flagimgs = FlagImages()
         self._pick = None  # row the app selected itself (see on_select)
         self._pump_id = self._tick_id = None
         self.state = "off"
@@ -1020,6 +1047,9 @@ class App(tk.Tk):
                      rowheight=P(30), font=self.f_b)
         st.map("T.Treeview", background=[("selected", INK)], foreground=[("selected", WHITE)])
         st.layout("T.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+        # rows are flag + name: drop the expander arrow's empty space on the left
+        st.layout("T.Treeview.Item", [("Treeitem.padding", {"sticky": "nswe", "children": [
+            ("Treeitem.image", {"side": "left", "sticky": ""}), ("Treeitem.text", {"side": "left", "sticky": ""})]})])
         st.layout("Flat.Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {
             "children": [("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})], "sticky": "ns"})])
         st.configure("Flat.Vertical.TScrollbar", background=INK, troughcolor=PAPER, borderwidth=0, width=P(10))
@@ -1046,9 +1076,9 @@ class App(tk.Tk):
         self.test_btn.pack(side="right")
         frame = tk.Frame(root, bg=INK, padx=P(2), pady=P(2))
         frame.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(frame, style="T.Treeview", columns=("name", "ping", "speed", "proto"), show="",
+        self.tree = ttk.Treeview(frame, style="T.Treeview", columns=("ping", "speed", "proto"), show="tree",
                                  selectmode="browse", height=6)
-        self.tree.column("name", anchor="w", stretch=True, width=P(150))
+        self.tree.column("#0", anchor="w", stretch=True, width=P(170))  # flag + server name
         self.tree.column("ping", anchor="e", width=P(58), stretch=False)
         self.tree.column("speed", anchor="e", width=P(88), stretch=False)
         self.tree.column("proto", anchor="e", width=P(62), stretch=False)
@@ -1238,19 +1268,25 @@ class App(tk.Tk):
         sel = self.tree.selection()
         if not sel:
             return ""
-        return "Быстрейший из списка" if sel[0] == "auto" else self.outs[int(sel[0])]["tag"]
+        return AUTO_LABEL if sel[0] == "auto" else self.outs[int(sel[0])]["tag"]
 
     def refresh_power(self):
         clock = ""
         if self.state == "on":
             s = int(time.time() - self.t0)
             clock = f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
-        name = self.active if self.state != "off" else self.sel_name()
-        if self.state == "on" and self.current and self.chosen() == "AUTO":
-            name = f"Авто: {self.current}"  # the real server, not just the word "auto"
-        elif self.state == "on" and self.current:
-            name = self.current
-        self.power.set(self.state, name, clock, self.blink)
+        label = self.active if self.state != "off" else self.sel_name()  # what the user picked
+        if self.state == "on" and self.current:  # the server the core is really on (auto mode switches by itself)
+            shown = flags.strip_flag(self.current)
+            name = f"Авто: {shown}" if self.chosen() == "AUTO" else shown
+            flag = self.flagimgs.for_tag(self.current)
+        elif label == AUTO_LABEL:
+            name, flag = label, self.flagimgs.get("AUTO")
+        elif label:
+            name, flag = flags.strip_flag(label), self.flagimgs.for_tag(label)
+        else:
+            name, flag = "", None
+        self.power.set(self.state, name, clock, self.blink, flag)
 
     def save(self, sources=True):
         """Persist settings. Background jobs pass sources=False so a half-edited sources box is not committed."""
@@ -1353,11 +1389,12 @@ class App(tk.Tk):
         if manual:
             self.say("Не все подписки обновились, показаны сохранённые серверы." if errors else "", err=bool(errors))
         if len(outs) > 1:
-            self.tree.insert("", "end", iid="auto", values=("Быстрейший из списка", "", "", "AUTO"))
+            self.tree.insert("", "end", iid="auto", text=AUTO_LABEL, image=self.flagimgs.get("AUTO"),
+                             values=("", "", "AUTO"))
         for i, o in enumerate(outs):
             ping, speed = self.results.get(o["tag"], (None, None))
-            self.tree.insert("", "end", iid=str(i), values=(o["tag"], fmt_ping(ping), fmt_speed(speed),
-                                                            PROTO.get(o["type"], o["type"].upper())))
+            self.tree.insert("", "end", iid=str(i), text=flags.strip_flag(o["tag"]), image=self.flagimgs.for_tag(o["tag"]),
+                             values=(fmt_ping(ping), fmt_speed(speed), PROTO.get(o["type"], o["type"].upper())))
         if self.results:
             self.sort_rows()
         pick = next((str(i) for i, o in enumerate(outs) if o["tag"] == keep), None)
@@ -1583,7 +1620,7 @@ class App(tk.Tk):
         hint = ("«Быстрейший из списка» сам выберет лучший по отклику и будет переключаться. "
                 "Чтобы подключаться только к одному серверу, выбери его в списке."
                 if self.tree.selection() and self.tree.selection()[0] == "auto" else "")
-        self.say(f"Самый быстрый: {self.outs[best]['tag']} ({what}).{src} {hint}".strip())
+        self.say(f"Самый быстрый: {flags.strip_flag(self.outs[best]['tag'])} ({what}).{src} {hint}".strip())
 
     def sort_rows(self):
         """Measured speed (desc), then ping (asc), unreachable and untested last; "auto" stays on top."""
