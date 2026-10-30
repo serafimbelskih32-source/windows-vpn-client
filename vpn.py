@@ -612,11 +612,16 @@ PROTO = {"shadowsocks": "SS", "hysteria2": "HY2", "vless": "VLESS", "vmess": "VM
 
 # ---------- speed test ----------
 TEST_BASE_PORT = 21080
+# Checked direct from Russia (2026-10-30): Cloudflare 403s the default Python User-Agent and caps `bytes` at 50 MB;
+# thinkbroadband answers 403 to everything; speed.hetzner.de no longer resolves. OVH is slow (7-10 Mbit/s), so it is last.
+# Russian hosts are last-resort fallbacks: the test runs through servers abroad, where they can be slow or filtered.
 SPEED_URLS = ("https://speed.cloudflare.com/__down?bytes=50000000",
-              "https://proof.ovh.net/files/100Mb.dat",
               "http://cachefly.cachefly.net/50mb.test",
-              "http://ipv4.download.thinkbroadband.com/50MB.zip",
-              "https://speed.hetzner.de/100MB.bin")
+              "https://proof.ovh.net/files/100Mb.dat",
+              "https://speedtest.selectel.ru/100MB",
+              "https://mirror.truenetwork.ru/ubuntu/ls-lR.gz")
+UA_BROWSER = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/124.0.0.0 Safari/537.36")
 PING_URL = "https://www.gstatic.com/generate_204"
 TOP_FOR_SPEED = 8
 
@@ -705,7 +710,9 @@ def resolve_servers(outs):
 
 def _opener(port):
     px = f"http://127.0.0.1:{port}"
-    return urllib.request.build_opener(urllib.request.ProxyHandler({"http": px, "https": px}))
+    op = urllib.request.build_opener(urllib.request.ProxyHandler({"http": px, "https": px}))
+    op.addheaders = [("User-Agent", UA_BROWSER), ("Accept", "*/*")]  # the default Python UA gets 403 from Cloudflare
+    return op
 
 
 def probe_ping(port):
@@ -731,7 +738,8 @@ def probe_ping(port):
         for i in range(3):
             t = time.perf_counter()
             try:
-                c.request("GET", target, headers={"Host": u.netloc, "Connection": "keep-alive"})
+                c.request("GET", target, headers={"Host": u.netloc, "Connection": "keep-alive",
+                                                  "User-Agent": UA_BROWSER})
                 c.getresponse().read()
             except Exception:
                 if i == 0:
@@ -746,9 +754,10 @@ def probe_ping(port):
     return best
 
 
-def probe_speed(port, secs=4.0):
-    """Download throughput in Mbit/s, measured from the first byte for up to `secs` seconds."""
-    for url in SPEED_URLS:
+def probe_speed(port, secs=4.0, urls=None):
+    """Download throughput through the server: (Mbit/s, url that answered), or (None, None).
+    Measured from the first bytes for up to `secs` seconds; `urls` is tried in order."""
+    for url in (urls or SPEED_URLS):
         try:
             r = _opener(port).open(url, timeout=5)
             try:
@@ -764,10 +773,10 @@ def probe_speed(port, secs=4.0):
             finally:
                 r.close()
             if total >= 100_000:
-                return total * 8 / max(dt, 0.01) / 1e6
+                return total * 8 / max(dt, 0.01) / 1e6, url
         except Exception:
             continue
-    return None
+    return None, None
 
 
 def fmt_ping(ms):
@@ -1244,11 +1253,17 @@ class App(tk.Tk):
                     self._ui(lambda i=i, shown=shown, d=done: (self._cell(i, ping=shown),
                                                                self.count.config(text=f"Пинг {d}/{len(outs)}")))
             top = sorted((i for i, ms in pings.items() if ms is not None), key=lambda i: pings[i])[:TOP_FOR_SPEED]
+            urls = list(SPEED_URLS)  # one source for the whole run so servers are compared on equal terms
+            self.speed_host = ""
             for n, i in enumerate(top, 1):
                 if self.test_stop.is_set():
                     break
                 self._ui(lambda n=n, t=len(top): self.count.config(text=f"Скорость {n}/{t}"))
-                sp = probe_speed(TEST_BASE_PORT + i)
+                sp, used = probe_speed(TEST_BASE_PORT + i, urls=urls)
+                if used:
+                    urls.remove(used)
+                    urls.insert(0, used)
+                    self.speed_host = urlsplit(used).hostname or ""
                 if sp is None and self.test_stop.is_set():
                     break
                 self._ui(lambda i=i, sp=(-1 if sp is None else sp): self._cell(i, speed=sp))
@@ -1291,7 +1306,8 @@ class App(tk.Tk):
             skipped = sum(1 for i in alive if res(i)[1] is not None and res(i)[1] < 0)
             if skipped:
                 what += f"; у {skipped} серверов скорость не замерилась"
-        self.say(f"Выбран самый быстрый: {self.outs[best]['tag']} ({what}).")
+        src = f" Скорость измерена загрузкой с {self.speed_host}." if getattr(self, "speed_host", "") else ""
+        self.say(f"Выбран самый быстрый: {self.outs[best]['tag']} ({what}).{src}")
 
     def sort_rows(self):
         """Measured speed (desc), then ping (asc), unreachable and untested last; "auto" stays on top."""
