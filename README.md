@@ -24,7 +24,6 @@
 | **Linux** ARM64 | [FimaVPN-linux-arm64](https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN-linux-arm64) | То же, что и выше. |
 | **macOS** Apple Silicon (M1 и новее) | [FimaVPN-macos-arm64.zip](https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN-macos-arm64.zip) | Распакуй, при первом запуске нажми правой кнопкой на программу и выбери «Открыть». |
 | **macOS** Intel | [FimaVPN-macos-x86_64.zip](https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN-macos-x86_64.zip) | То же, что и выше. |
-| **Android** | [своего приложения нет](#android) | Подписка работает в sing-box for Android, Hiddify и Karing. |
 
 Все файлы и контрольные суммы: [страница релизов](https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest).
 
@@ -61,16 +60,6 @@
 Включить и выключить автообновление, проверить версию вручную и увидеть номер установленной версии можно внизу окна. Если автообновление выключено, программа сама ничего не проверяет и не скачивает.
 
 Контрольная сумма защищает от повреждённой загрузки, но не от подмены самого релиза: обновление доверяет этому репозиторию. Если ты не хочешь этого, выключи автообновление и собирай из исходников.
-
-## Android
-
-Своего приложения для Android пока нет: оно требует отдельной разработки, и без проверки на телефоне выкладывать его нельзя. Зато та же ссылка-подписка работает в готовых приложениях:
-
-- **[sing-box for Android](https://sing-box.sagernet.org/clients/android/)** (официальное приложение ядра): «Profiles» → «New» → «Remote», вставь ссылку-подписку.
-- **[Hiddify](https://github.com/hiddify/hiddify-app/releases)**: «Новый профиль» → вставь ссылку.
-- **Karing**: «Добавить профиль» → вставь ссылку.
-
-Если собственное приложение для Android нужно, напиши в [Issues](https://github.com/serafimbelskih32-source/windows-vpn-client/issues).
 
 ## Частые вопросы
 
