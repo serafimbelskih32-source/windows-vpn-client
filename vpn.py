@@ -56,6 +56,8 @@ RUNCFG = os.path.join(DATA, "run.json")
 LOGFILE = os.path.join(DATA, "sing-box.log")
 TESTCFG = os.path.join(DATA, "test.json")
 TESTLOG = os.path.join(DATA, "test.log")
+HOMECFG = os.path.join(DATA, "home.json")  # a throw-away core that only asks which country this computer is really in
+HOMELOG = os.path.join(DATA, "home.log")
 SUBCACHE = os.path.join(DATA, "subs.json")
 EXITFILE = os.path.join(DATA, "exit.json")  # "server:port" -> country the server really exits to (found by the test)
 RULES_DIR = os.path.join(DATA, "rules")
@@ -438,13 +440,14 @@ def merge_outs(groups):
 
 
 # ---------- config build ----------
-def build_config(outs, chosen, ru_direct, extra_direct, api=None):
-    """`api` = (port, secret): expose the core's local API so the window can show which server auto mode picked."""
+def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None):
+    """`api` = (port, secret): expose the core's local API so the window can show which server auto mode picked.
+    `auto_tags`: the servers «Быстрейший из списка» may choose from (default: all); a hand-picked server is always allowed."""
     tags = [o["tag"] for o in outs]
     proxy_out = {"type": "selector", "tag": "proxy", "outbounds": tags, "default": chosen if chosen in tags else tags[0]}
     if chosen == "AUTO" and len(tags) > 1:
-        proxy_out = {"type": "urltest", "tag": "proxy", "outbounds": tags, "url": "https://www.gstatic.com/generate_204",
-                     "interval": "3m"}
+        proxy_out = {"type": "urltest", "tag": "proxy", "outbounds": [t for t in (auto_tags or tags) if t in tags] or tags,
+                     "url": "https://www.gstatic.com/generate_204", "interval": "3m"}
     domains = list(extra_direct)
     rules = [
         {"action": "sniff"},
@@ -637,6 +640,7 @@ class Dialog(tk.Toplevel):
                 self.iconbitmap(os.path.join(BASE, "icon.ico"))
         except Exception:  # noqa: BLE001
             pass
+        set_window_icon(self)
         fam = ui_family(self)
         body = tk.Frame(self, bg=BG)
         body.pack(padx=P(3), pady=P(3))
@@ -691,6 +695,35 @@ def show_error(parent, text):
 
 def ask_yes_no(parent, text, yes="Да", no="Нет"):
     return Dialog(parent, text, [yes, no], "question", 0, 1).result == 0
+
+
+def set_window_icon(win):
+    """Windows: give the window icons at the exact sizes this display scaling uses: 16 px for the title bar and 24 px
+    for the taskbar at 100 % (30 / 36 / 48 at 125 / 150 / 200 %). Tk's iconbitmap hands Windows only a 16 and a 32 px
+    icon and the shell stretches those to the taskbar size, which blurred the edges."""
+    if not IS_WIN:
+        return
+    try:
+        win.update_idletasks()
+        user = ctypes.windll.user32
+        user.GetParent.restype = ctypes.c_void_p
+        user.GetParent.argtypes = [ctypes.c_void_p]
+        hwnd = user.GetParent(win.winfo_id()) or win.winfo_id()
+        try:
+            dpi = user.GetDpiForSystem()
+        except Exception:  # noqa: BLE001
+            dpi = 96
+        user.LoadImageW.restype = ctypes.c_void_p
+        user.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        user.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_void_p]
+        path = os.path.join(BASE, "icon.ico")
+        for which, base in ((0, 16), (1, 24)):  # ICON_SMALL (title bar), ICON_BIG (taskbar)
+            size = round(base * dpi / 96)
+            handle = user.LoadImageW(None, path, 1, size, size, 0x10)  # IMAGE_ICON, LR_LOADFROMFILE
+            if handle:
+                user.SendMessageW(hwnd, 0x80, which, handle)  # WM_SETICON
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class FlagImages:
@@ -781,6 +814,10 @@ PROTO = {"shadowsocks": "SS", "hysteria2": "HY2", "vless": "VLESS", "vmess": "VM
 
 # ---------- speed test ----------
 TEST_BASE_PORT = 21080
+HOME_PORT = TEST_BASE_PORT - 1
+# Countries where blocking happens: a server that exits there gives no way round it. If the user is in one of them,
+# «Быстрейший из списка» passes over servers that exit in the same country; elsewhere such a server is as good as any.
+NO_BYPASS = ("RU",)
 # Checked direct from Russia (2026-10-30): Cloudflare 403s the default Python User-Agent and caps `bytes` at 50 MB;
 # thinkbroadband answers 403 to everything; speed.hetzner.de no longer resolves. OVH is slow (7-10 Mbit/s), so it is last.
 # Russian hosts are last-resort fallbacks: the test runs through servers abroad, where they can be slow or filtered.
@@ -813,6 +850,56 @@ def build_test_config(outs, nic=None):
     if nic:
         cfg["route"]["default_interface"] = nic
     return cfg
+
+
+def build_home_config(nic=None):
+    """A core with one local port and a direct exit pinned to the physical adapter: whatever answers through it is this
+    computer's own connection, VPN or not."""
+    cfg = {"log": {"level": "warn", "output": HOMELOG},
+           "dns": {"servers": [{"type": "udp", "tag": "local", "server": "77.88.8.8"}], "strategy": "ipv4_only"},
+           "inbounds": [{"type": "mixed", "tag": "home-in", "listen": "127.0.0.1", "listen_port": HOME_PORT}],
+           "outbounds": [{"type": "direct", "tag": "direct"}],
+           "route": {"final": "direct", "default_domain_resolver": "local"}}
+    if nic:
+        cfg["route"]["default_interface"] = nic
+    return cfg
+
+
+HOME_PROC = None  # the home probe's core while it runs, so quitting the app can stop it
+
+
+def detect_home(nic=None):
+    """Two-letter country this computer really connects from (around any VPN that is running), or None."""
+    global HOME_PROC
+    p = None
+    try:
+        write_json(HOMECFG, build_home_config(nic))
+        p = subprocess.Popen([CORE, "run", "-c", HOMECFG], cwd=DATA, creationflags=NOWIN,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        own(p)
+        HOME_PROC = p
+        deadline = time.time() + 8
+        while True:
+            if p.poll() is not None:
+                return None
+            try:
+                socket.create_connection(("127.0.0.1", HOME_PORT), 0.3).close()
+                break
+            except OSError:
+                if time.time() > deadline:
+                    return None
+                time.sleep(0.2)
+        return probe_exit(HOME_PORT, urls=tuple(reversed(EXIT_URLS)))  # from Russia the bare IP answers, the domain does not
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        HOME_PROC = None
+        if p is not None and p.poll() is None:
+            p.terminate()
+            try:
+                p.wait(5)
+            except Exception:  # noqa: BLE001
+                p.kill()
 
 
 TUNLIKE = re.compile(r"^(tun|utun|wg|tailscale|ppp|ipsec|zt|sing|" + re.escape(TUN_NAME) + ")", re.I)
@@ -1101,6 +1188,7 @@ class App(tk.Tk):
                 self.iconphoto(True, self._icon)
         except Exception:
             pass
+        set_window_icon(self)
         self.configure(bg=BG)
         self.geometry(f"{P(480)}x{P(840)}")
         self.minsize(P(440), P(760))
@@ -1146,6 +1234,7 @@ class App(tk.Tk):
         self.cfg = {"sources": "", "chosen": "AUTO", "ru_direct": True, "extra": "", "rules_ok": 0, "rules_try": 0,
                     "auto_update": None,  # None = not asked yet
                     "show_flags": True, "show_ping": True, "show_speed": True,
+                    "skip_home": True,  # auto mode passes over servers that exit in the user's own blocking country
                     "tray_on_close": True, "tray_hint_shown": False}
         try:
             self.cfg.update(json.load(open(SETTINGS, encoding="utf-8-sig")))
@@ -1155,6 +1244,8 @@ class App(tk.Tk):
             self.subs = json.load(open(SUBCACHE, encoding="utf-8"))
         except Exception:
             pass
+        self.home_cc = self.cfg.get("home_cc") if isinstance(self.cfg.get("home_cc"), str) else None  # where this computer is
+        self.live_tag = ""  # the server the connection is on right now (its row is blue)
         self.exit_cc = {}  # server -> real exit country, learned by the speed test and kept between runs
         try:
             self.exit_cc = {k: v for k, v in json.load(open(EXITFILE, encoding="utf-8")).items() if isinstance(v, str)}
@@ -1208,6 +1299,7 @@ class App(tk.Tk):
         sb.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.tag_configure("live", foreground=BLUE, font=(fam, FZ(11), "bold"))
+        self.tree.tag_configure("home", foreground=MUTE)  # servers «Быстрейший из списка» passes over
         self.tree.bind("<Configure>", self.fit_tree_columns, add="+")
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind("<Double-1>", lambda e: self.toggle() if self.state == "off" else None)
@@ -1258,7 +1350,11 @@ class App(tk.Tk):
                           ("Скорость: показывать и измерять", self.v_speed)):
             Check(self.set_box, text, var, self.f_b).pack(anchor="w", pady=(0, P(2)))
             var.trace_add("write", self.on_view_toggle)
-        self.v_tray = tk.BooleanVar(value=bool(self.cfg.get("tray_on_close", True)))
+        self.v_skip = tk.BooleanVar(value=bool(self.cfg.get("skip_home", True)))
+        Check(self.set_box, "Автовыбор: пропускать серверы России, если я в России", self.v_skip,
+              self.f_b).pack(anchor="w", pady=(0, P(2)))
+        self.v_skip.trace_add("write", self.on_skip_toggle)
+        self.v_tray =tk.BooleanVar(value=bool(self.cfg.get("tray_on_close", True)))
         if self.tray_ok:
             Check(self.set_box, "Закрытие окна сворачивает в трей", self.v_tray, self.f_b).pack(anchor="w", pady=(0, P(2)))
             self.v_tray.trace_add("write", lambda *a: (self.cfg.update(tray_on_close=self.v_tray.get()),
@@ -1295,6 +1391,7 @@ class App(tk.Tk):
             finally:
                 self.clean_done.set()
         threading.Thread(target=clean, daemon=True).start()
+        threading.Thread(target=self.home_worker, daemon=True).start()
         self._pump_id = self.after(50, self.pump)
         self.start_instance_server()
         self.after(300, self.refresh_due)
@@ -1487,6 +1584,62 @@ class App(tk.Tk):
             return cc if cc in flags.FLAGS else "??"  # a real country without a drawing: neutral tile, never a wrong flag
         return flags.code_for(o["tag"])
 
+    def skip_cc(self):
+        """The country «Быстрейший из списка» keeps away from: the one the user is in, if blocking happens there
+        (and the user has not switched this off in the settings)."""
+        if not self.cfg.get("skip_home", True):
+            return None
+        return self.home_cc if self.home_cc in NO_BYPASS else None
+
+    def on_skip_toggle(self, *a):
+        self.cfg["skip_home"] = self.v_skip.get()
+        self.save(sources=False)
+        self.paint_rows()
+        if self.state != "off" and self.chosen() == "AUTO":
+            self.say("Автовыбор учтёт это при следующем подключении.")
+
+    def is_home_exit(self, o):
+        """Does this server exit in the user's own blocking country? Such a server bypasses nothing."""
+        cc = self.skip_cc()
+        return bool(cc) and self.flag_code(o) == cc
+
+    def auto_pool(self):
+        """Tags «Быстрейший из списка» may use. Never empty: if every server is such a one, all of them stay."""
+        keep = [o["tag"] for o in self.outs if not self.is_home_exit(o)]
+        return keep or [o["tag"] for o in self.outs]
+
+    def row_tags(self, iid):
+        if iid == "auto":
+            return ()
+        o = self.outs[int(iid)]
+        if self.live_tag and o["tag"] == self.live_tag:
+            return ("live",)
+        return ("home",) if self.is_home_exit(o) else ()
+
+    def paint_rows(self):
+        for iid in self.tree.get_children():
+            self.tree.item(iid, tags=self.row_tags(iid))
+
+    def home_worker(self):
+        """At start: ask where this computer really is (not where a running VPN is), in the background."""
+        self.clean_done.wait(10)  # a leftover core of ours would answer with its own exit
+        nic = physical_nic()
+        if IS_LINUX and self.state == "off":
+            nic = None
+        if not nic and self.state != "off":
+            return  # a VPN is up and the real adapter is unknown: any answer would be the tunnel's
+        cc = detect_home(nic)
+        if cc:
+            self._ui(lambda: self.set_home(cc))
+
+    def set_home(self, cc):
+        changed = cc != self.home_cc
+        self.home_cc = cc
+        self.cfg["home_cc"] = cc
+        self.save(sources=False)
+        if changed:
+            self.paint_rows()
+
     def flag_for_tag(self, tag):
         o = next((o for o in self.outs if o["tag"] == tag), None)
         return self.flagimgs.get(self.flag_code(o) if o else flags.code_for(tag))
@@ -1498,7 +1651,8 @@ class App(tk.Tk):
         o = self.outs[i]
         self.exit_cc[okey(o)] = cc
         if self.tree.exists(str(i)):
-            self.tree.item(str(i), image=self.flagimgs.get(self.flag_code(o)) if self.v_flags.get() else "")
+            self.tree.item(str(i), image=self.flagimgs.get(self.flag_code(o)) if self.v_flags.get() else "",
+                           tags=self.row_tags(str(i)))
         if self.state != "off":
             self.refresh_power()
 
@@ -1638,8 +1792,7 @@ class App(tk.Tk):
         else:
             self.tree.yview_moveto(top)
         self.count.config(text=str(len(outs)))
-        if self.state == "on" and self.current:
-            self.mark_live(self.current)  # the list was rebuilt: keep the live row marked
+        self.paint_rows()  # the list was rebuilt: keep the live row marked, mute the skipped ones
         self.save(sources=manual)
 
     def note_subs(self):
@@ -1757,7 +1910,7 @@ class App(tk.Tk):
         ms = probe_ping(port) if ping_on else None
         alive = (ms is not None) if ping_on else None
         cc = None
-        if (flags_on or not ping_on) and alive is not False and not self.test_stop.is_set():
+        if (flags_on or not ping_on or self.skip_cc()) and alive is not False and not self.test_stop.is_set():
             cc = probe_exit(port)
             if alive is None:  # the country request doubles as the alive check; a plain request is the fallback
                 alive = cc is not None or probe_ping(port) is not None
@@ -1880,7 +2033,10 @@ class App(tk.Tk):
         def res(i):
             return self.results.get(self.outs[i]["tag"], (None, None))
 
-        alive = [i for i in range(len(self.outs)) if self.is_alive(i)]
+        alive_all = [i for i in range(len(self.outs)) if self.is_alive(i)]
+        # «самый быстрый» is advice on what to connect to: a server in the user's own blocking country is no answer
+        alive = [i for i in alive_all if not self.is_home_exit(self.outs[i])] or alive_all
+        passed = len(alive_all) - len(alive)
         if not alive:
             asked = any(self.alive.get(o["tag"]) is not None or res(i)[0] is not None for i, o in enumerate(self.outs))
             return self.say("Ни один сервер не ответил." if asked else "Тест остановлен до первых результатов.", err=True)
@@ -1910,7 +2066,7 @@ class App(tk.Tk):
             head = f"Самый быстрый по отклику: {flags.strip_flag(self.outs[best]['tag'])} ({fmt_ping(res(best)[0])})."
         else:
             best = None
-            head = f"Ответили {len(alive)} из {len(self.outs)} серверов."
+            head = f"Ответили {len(alive_all)} из {len(self.outs)} серверов."
         if show_flags:
             wrong = sum(1 for o in self.outs
                         if self.exit_cc.get(okey(o)) and flags.code_for(o["tag"]) not in ("??", self.exit_cc[okey(o)]))
@@ -1919,6 +2075,8 @@ class App(tk.Tk):
         if best is not None and self.tree.selection() and self.tree.selection()[0] == "auto":
             hint = ("«Быстрейший из списка» сам выберет лучший по отклику и будет переключаться. "
                     "Чтобы подключаться только к одному серверу, выбери его в списке.")
+        if passed:
+            hint += " Серые серверы (выход в России) «Быстрейший из списка» не берёт: через них блокировки не обойти."
         self.say(f"{head}{src}{note} {hint}".strip())
 
     def sort_rows(self):
@@ -1951,7 +2109,8 @@ class App(tk.Tk):
             return
         self.api = (free_port(), secrets.token_hex(16))  # new secret per connection, loopback only
         self.current = ""
-        cfg = build_config(self.outs, self.chosen(), self.ru.get(), self.extra.get().split(), self.api)
+        cfg = build_config(self.outs, self.chosen(), self.ru.get(), self.extra.get().split(), self.api,
+                           self.auto_pool())
         json.dump(cfg, open(RUNCFG, "w", encoding="utf-8"), indent=1)
         open(LOGFILE, "w").close()
         self._pos = 0
@@ -1992,9 +2151,8 @@ class App(tk.Tk):
 
     def mark_live(self, tag):
         """Blue bold row = the server the connection is using right now."""
-        for iid in self.tree.get_children():
-            live = iid != "auto" and bool(tag) and self.outs[int(iid)]["tag"] == tag
-            self.tree.item(iid, tags=("live",) if live else ())
+        self.live_tag = tag or ""
+        self.paint_rows()
 
     def poll_current(self):
         """Ask the core which server auto mode is on (off the UI thread; at most one request in flight)."""
@@ -2101,9 +2259,9 @@ class App(tk.Tk):
         self.quitting = True
         self.save()
         self.test_stop.set()
-        p = self.test_proc
-        if p and p.poll() is None:
-            p.kill()
+        for p in (self.test_proc, HOME_PROC):
+            if p and p.poll() is None:
+                p.kill()
         self.stop()
         if self.cfg.get("auto_update") and self.frozen():
             info = updater.staged(UPDATE_DIR)  # a downloaded update installs while the program is closed
