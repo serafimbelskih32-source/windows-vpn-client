@@ -7,6 +7,8 @@ import re
 from collections import Counter
 from urllib.parse import parse_qs, unquote, urlparse
 
+from i18n import T
+
 try:
     import yaml  # block-style Clash files; flow-style ones (what most converters write) are read without it
 except Exception:  # noqa: BLE001
@@ -18,10 +20,10 @@ class Unsupported(Exception):
 
 
 # What the user reads when servers had to be left out.
-WHY = {"xhttp": "транспорт XHTTP", "kcp": "транспорт mKCP", "quic": "старый транспорт QUIC", "ssr": "ShadowsocksR",
-       "wireguard": "WireGuard", "vless-enc": "шифрование VLESS (encryption)", "tcp-http": "TCP с подменой заголовка HTTP",
+WHY = {"xhttp": T("транспорт XHTTP"), "kcp": T("транспорт mKCP"), "quic": T("старый транспорт QUIC"), "ssr": "ShadowsocksR",
+       "wireguard": "WireGuard", "vless-enc": T("шифрование VLESS (encryption)"), "tcp-http": T("TCP с подменой заголовка HTTP"),
        "naive": "NaiveProxy", "ssh": "SSH", "snell": "Snell", "mieru": "Mieru", "amneziawg": "AmneziaWG",
-       "other": "неизвестный протокол"}
+       "other": T("неизвестный протокол")}
 # The core (sing-box) cannot run these, Xray can: such a server is kept as an "xray" server that a companion Xray
 # process serves on a local port (see engines.py).
 XRAY_REASONS = ("xhttp", "kcp", "tcp-http", "vless-enc")
@@ -924,8 +926,8 @@ def skipped_note(skipped):
         return ""
     n = sum(skipped.values())
     parts = ", ".join(f"{WHY.get(k, k)}: {v}" for k, v in skipped.most_common())
-    word = "сервер" if n % 10 == 1 and n % 100 != 11 else "сервера" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "серверов"
-    return f"Пропущено {n} {word}, которые программа не умеет запускать ({parts})."
+    word = T("сервер") if n % 10 == 1 and n % 100 != 11 else T("сервера") if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else T("серверов")
+    return T("Пропущено {0} {1}, которые программа не умеет запускать ({2}).").format(n, word, parts)
 
 
 def _unique_tags(outs):

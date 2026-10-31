@@ -6,6 +6,8 @@ The menu callbacks run on pystray's own thread, so they never touch the window d
 """
 import sys
 
+from i18n import T
+
 
 def _sharp_icon_class():
     """Windows only. pystray loads its icon at Windows' 'default' size (32 px) and lets the shell shrink it to the
@@ -43,7 +45,7 @@ class Tray:
         self._pystray = pystray_module  # tests pass a stand-in
         self.icon = None
         self.connected = False
-        self.title = "VPN: выключено"
+        self.title = T("VPN: выключено")
         self._images = {}
 
     def image(self, connected):
@@ -62,11 +64,11 @@ class Tray:
         try:
             pystray = self._pystray or __import__("pystray")
             menu = pystray.Menu(
-                pystray.MenuItem("Показать окно", lambda icon, item: self.post(self.on_show), default=True),
-                pystray.MenuItem(lambda item: "Отключить" if self.connected else "Подключить",
+                pystray.MenuItem(T("Показать окно"), lambda icon, item: self.post(self.on_show), default=True),
+                pystray.MenuItem(lambda item: T("Отключить") if self.connected else T("Подключить"),
                                  lambda icon, item: self.post(self.on_toggle)),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Выход", lambda icon, item: self.post(self.on_quit)))
+                pystray.MenuItem(T("Выход"), lambda icon, item: self.post(self.on_quit)))
             icon_class = (_sharp_icon_class() if self._pystray is None else None) or pystray.Icon
             self.icon = icon_class("FimaVPN", self.image(False), self.title, menu)
             self.icon.run_detached()

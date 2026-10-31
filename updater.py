@@ -20,6 +20,8 @@ import urllib.error
 import urllib.request
 from urllib.parse import urljoin, urlsplit
 
+from i18n import T
+
 VERSION = "1.2.0"  # the release workflow rewrites this line from the git tag
 REPO = "serafimbelskih32-source/windows-vpn-client"
 API = f"https://api.github.com/repos/{REPO}/releases/latest"
@@ -51,7 +53,7 @@ def asset_name(system=None, machine=None):
 def _check_url(url):
     u = urlsplit(url)
     if not ALLOW_ANY_HOST and (u.scheme != "https" or u.hostname not in ALLOWED_HOSTS):
-        raise ValueError(f"адрес не из списка разрешённых: {u.hostname}")
+        raise ValueError(T("адрес не из списка разрешённых: {0}").format(u.hostname))
 
 
 def usable_proxies():
@@ -119,27 +121,27 @@ def explain(e):
     if isinstance(e, urllib.error.HTTPError):
         c = e.code
         if c in (401, 403):
-            return f"сервер отказал в доступе (код {c}): ссылка устарела, подписка отключена или сайт не пускает программу"
+            return T("сервер отказал в доступе (код {0}): ссылка устарела, подписка отключена или сайт не пускает программу").format(c)
         if c == 404:
-            return "по этой ссылке ничего нет (код 404): проверь, что ссылка скопирована целиком"
+            return T("по этой ссылке ничего нет (код 404): проверь, что ссылка скопирована целиком")
         if c == 429:
-            return "слишком много запросов (код 429): подожди несколько минут и попробуй снова"
+            return T("слишком много запросов (код 429): подожди несколько минут и попробуй снова")
         if c >= 500:
-            return f"на стороне сайта неполадка (код {c}): попробуй позже"
-        return f"сайт ответил кодом {c}"
+            return T("на стороне сайта неполадка (код {0}): попробуй позже").format(c)
+        return T("сайт ответил кодом {0}").format(c)
     if isinstance(reason, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in text:
-        return ("сертификат сайта не прошёл проверку. Проверь дату и время на устройстве. Если стоит антивирус, который "
-                "проверяет защищённые соединения, или ты в сети, где подменяют сертификаты, подписку не загрузить")
+        return (T("сертификат сайта не прошёл проверку. Проверь дату и время на устройстве. Если стоит антивирус, который "
+                "проверяет защищённые соединения, или ты в сети, где подменяют сертификаты, подписку не загрузить"))
     if isinstance(reason, ssl.SSLError):
-        return "не получилось установить защищённое соединение с сайтом. Скорее всего, его блокирует провайдер"
+        return T("не получилось установить защищённое соединение с сайтом. Скорее всего, его блокирует провайдер")
     if isinstance(reason, socket.gaierror) or "getaddrinfo" in text or "Name or service not known" in text:
-        return "не нашёл адрес сайта (DNS). Проверь интернет. Если у провайдера не работает DNS, программа попробует обойти это сама"
+        return T("не нашёл адрес сайта (DNS). Проверь интернет. Если у провайдера не работает DNS, программа попробует обойти это сама")
     if isinstance(reason, (socket.timeout, TimeoutError)) or "timed out" in text:
-        return "сайт не ответил вовремя. Возможно, его блокирует провайдер: включи другой VPN и нажми «Обновить»"
+        return T("сайт не ответил вовремя. Возможно, его блокирует провайдер: включи другой VPN и нажми «Обновить»")
     if isinstance(reason, (ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError)):
-        return "соединение отклонено или оборвано. Так бывает, когда сайт блокирует провайдер: включи другой VPN и нажми «Обновить»"
+        return T("соединение отклонено или оборвано. Так бывает, когда сайт блокирует провайдер: включи другой VPN и нажми «Обновить»")
     if isinstance(reason, OSError) and getattr(reason, "errno", None) in (51, 65, 101, 113, 10051, 10065):
-        return "нет сети: проверь подключение к интернету"
+        return T("нет сети: проверь подключение к интернету")
     return (text or e.__class__.__name__)[:160]
 
 
@@ -190,10 +192,10 @@ def get_resolved(url, headers, timeout=20, max_bytes=8 * 1024 * 1024, redirects=
     with lower-case names). Raises OSError when nothing can be resolved."""
     u = urlsplit(url)
     if u.scheme not in ("http", "https") or not u.hostname:
-        raise ValueError("неверная ссылка")
+        raise ValueError(T("неверная ссылка"))
     ips = resolve_doh(u.hostname)
     if not ips:
-        raise OSError("не получилось узнать адрес сайта ни через DNS провайдера, ни через запасной DNS")
+        raise OSError(T("не получилось узнать адрес сайта ни через DNS провайдера, ни через запасной DNS"))
     path = (u.path or "/") + (f"?{u.query}" if u.query else "")
     last = None
     for ip in ips[:3]:
@@ -217,7 +219,7 @@ def get_resolved(url, headers, timeout=20, max_bytes=8 * 1024 * 1024, redirects=
             raise
         except Exception as e:  # noqa: BLE001
             last = e
-    raise last or OSError("нет ответа")
+    raise last or OSError(T("нет ответа"))
 
 
 def _open(url, timeout=30):
@@ -291,7 +293,7 @@ def stage(upd, dest_dir, progress=None):
     with _open(upd["sums"]) as r:
         expected = parse_sums(r.read(1_000_000).decode("utf-8", "replace")).get(upd["name"])
     if not expected:
-        raise ValueError("в релизе нет контрольной суммы для этого файла")
+        raise ValueError(T("в релизе нет контрольной суммы для этого файла"))
     final = os.path.join(dest_dir, upd["name"])
     part = final + ".part"
     h, size = hashlib.sha256(), 0
@@ -300,13 +302,13 @@ def stage(upd, dest_dir, progress=None):
             for chunk in iter(lambda: r.read(1 << 20), b""):
                 size += len(chunk)
                 if size > MAX_SIZE:
-                    raise ValueError("файл обновления слишком большой")
+                    raise ValueError(T("файл обновления слишком большой"))
                 h.update(chunk)
                 f.write(chunk)
                 if progress:
                     progress(size)
         if h.hexdigest() != expected:
-            raise ValueError("контрольная сумма скачанного файла не совпала")
+            raise ValueError(T("контрольная сумма скачанного файла не совпала"))
         os.replace(part, final)
     finally:
         if os.path.exists(part):
@@ -435,7 +437,7 @@ def apply_macos(src_zip, bundle, relaunch, pids):
     subprocess.run(["ditto", "-x", "-k", src_zip, work], check=True)
     apps = [n for n in os.listdir(work) if n.endswith(".app")]
     if not apps:
-        raise ValueError("в архиве нет приложения")
+        raise ValueError(T("в архиве нет приложения"))
     new = os.path.join(work, apps[0])
     q = lambda p: "'" + p.replace("'", "'\\''") + "'"  # noqa: E731
     wait = "".join(f"while kill -0 {p} 2>/dev/null; do sleep 0.5; done; " for p in pids)

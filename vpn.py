@@ -29,12 +29,15 @@ import http.client
 
 import engines
 import flags
+import i18n
+from i18n import T
+import regions
 import tray
 import updater
 
 updater.trust_certificates()  # a packaged program on a Mac has no certificates of its own: without this no https works
 
-AUTO_LABEL = "Быстрейший из списка"
+AUTO_LABEL = T("Быстрейший из списка")
 APP = "FimaVPN"  # settings folder name only
 TITLE = "VPN"
 IS_WIN = sys.platform == "win32"
@@ -62,6 +65,7 @@ STOPFILE = os.path.join(DATA, "stop")  # Linux/macOS: the root supervisor stops 
 INSTANCE_FILE = os.path.join(DATA, "instance.port")  # loopback port of the running copy, so a 2nd launch can reach it
 UPDATE_DIR = updater.update_dir(DATA)  # a downloaded, verified update waits here for the next start (one folder per program file)
 SETTINGS = os.path.join(DATA, "settings.json")
+i18n.set_language(i18n.initial_language(SETTINGS))  # before any text below is made
 RUNCFG = os.path.join(DATA, "run.json")
 LOGFILE = os.path.join(DATA, "sing-box.log")
 TESTCFG = os.path.join(DATA, "test.json")
@@ -257,7 +261,7 @@ def fetch(url: str, ua: str, via=None):
         raw, headers = updater.get_resolved(url, {"User-Agent": ua}, 20, MAX_SUB_BYTES)
         body = raw
     if len(body) > MAX_SUB_BYTES:
-        raise ValueError("ответ слишком большой для подписки")
+        raise ValueError(T("ответ слишком большой для подписки"))
     if body[:2] == b"\x1f\x8b":  # some panels compress even when not asked to
         import gzip
         body = gzip.decompress(body)
@@ -277,11 +281,11 @@ def split_sources(src: str):
 def human_bytes(n):
     """12 ГБ, 1,5 ТБ, 340 МБ: what a person reads."""
     n = float(n)
-    for unit, size in (("ТБ", 1 << 40), ("ГБ", 1 << 30), ("МБ", 1 << 20)):
+    for unit, size in ((T("ТБ"), 1 << 40), (T("ГБ"), 1 << 30), (T("МБ"), 1 << 20)):
         if n >= size:
             v = n / size
             return (f"{v:.0f}" if v >= 100 else f"{v:.1f}".replace(".", ",").removesuffix(",0")) + " " + unit
-    return f"{n / 1024:.0f} КБ" if n >= 1024 else f"{n:.0f} Б"
+    return T("{0:.0f} КБ").format(n / 1024) if n >= 1024 else T("{0:.0f} Б").format(n)
 
 
 def usage_line(info, host, now=None):
@@ -294,21 +298,21 @@ def usage_line(info, host, now=None):
     parts, warn = [], False
     if total > 0:
         left = max(0, total - used)
-        parts.append(f"осталось {human_bytes(left)} из {human_bytes(total)}")
+        parts.append(T("осталось {0} из {1}").format(human_bytes(left), human_bytes(total)))
         warn = warn or left <= total * 0.1
     elif used > 0:
-        parts.append(f"использовано {human_bytes(used)}")
+        parts.append(T("использовано {0}").format(human_bytes(used)))
     if expire > 0:
         days = (expire - now) / 86400
         if days < 0:
-            parts.append("срок вышел")
+            parts.append(T("срок вышел"))
             warn = True
         else:
-            parts.append("до " + time.strftime("%d.%m.%Y", time.localtime(expire)) + (f" (ещё {int(days) + (1 if days > int(days) else 0)} дн.)" if days <= 7 else ""))
+            parts.append(T("до ") + time.strftime("%d.%m.%Y", time.localtime(expire)) + (T(" (ещё {0} дн.)").format(int(days) + (1 if days > int(days) else 0)) if days <= 7 else ""))
             warn = warn or days <= 3
     if not parts:
         return "", False
-    name = str((info or {}).get("title") or host or "подписка")[:40]
+    name = str((info or {}).get("title") or host or T("подписка"))[:40]
     return f"{name}: " + ", ".join(parts), warn
 
 
@@ -354,7 +358,7 @@ def fetch_source(url, prefer=None, via=None, merge=False):
     81 servers to one client and 35, with Hysteria2, to another). Returns (outs, info, ua, errors)."""
     errors = []
     got = []  # (outs, info, ua) of each answer, when merging
-    host = urlsplit(url).hostname or "подписка"  # the path holds the user's key: never shown
+    host = urlsplit(url).hostname or T("подписка")  # the path holds the user's key: never shown
     for route in ((None, via) if via else (None,)):
         for ua in sorted(UAS[:3] if merge else UAS, key=lambda u: u != prefer):
             try:
@@ -380,7 +384,7 @@ def fetch_source(url, prefer=None, via=None, merge=False):
                 if msg not in errors:
                     errors.append(msg)
                 continue
-            msg = f"{host}: в ответе нет серверов (ссылка устарела или это не подписка)"
+            msg = T("{0}: в ответе нет серверов (ссылка устарела или это не подписка)").format(host)
             if msg not in errors:
                 errors.append(msg)
         if got:
@@ -426,13 +430,13 @@ def merge_outs(groups):
 
 
 RELEASES_URL = f"https://github.com/{updater.REPO}/releases/latest"
-MSG_DEAD_PROXY = ("В Windows включён прокси {addr}, но он не отвечает. Скорее всего, он остался от другой программы "
+MSG_DEAD_PROXY = (T("В Windows включён прокси {addr}, но он не отвечает. Скорее всего, он остался от другой программы "
                   "(например, VPN-клиента), которую закрыли или после перезагрузки компьютера.\n\nИз-за него браузер и многие "
                   "программы не открывают сайты, даже когда VPN включён.\n\nОтключить этот прокси? Если он снова понадобится, "
-                  "программа, которая его создала, включит его сама.")
-MSG_NO_CORE = ("Не хватает файла, без которого VPN не работает.\n\nТак бывает, когда антивирус удаляет его по ошибке. "
+                  "программа, которая его создала, включит его сама."))
+MSG_NO_CORE = (T("Не хватает файла, без которого VPN не работает.\n\nТак бывает, когда антивирус удаляет его по ошибке. "
                "Что сделать:\n1. Добавь программу в исключения антивируса.\n2. Скачай программу заново и запусти её.\n\n"
-               "Если не получится, напиши об этом на странице проекта на GitHub.")
+               "Если не получится, напиши об этом на странице проекта на GitHub."))
 
 
 # ---------- advanced ("pro") settings ----------
@@ -476,10 +480,10 @@ PRO_FIELDS = {
 PRO_DEFAULTS = {k: v[0] for k, v in PRO_FIELDS.items()}
 RESTART_KEYS = ("theme", "accent", "accent_hex", "ui_scale", "density", "ui_font", "border")  # read when the window is built
 PRO_LABELS = {  # what the segmented choices say (the stored value is the key)
-    "theme": {"auto": "Как в системе", "light": "Светлая", "dark": "Тёмная", "contrast": "Контрастная"},
-    "accent": {"blue": "Синий", "green": "Зелёный", "orange": "Оранжевый", "violet": "Фиолетовый", "pink": "Розовый"},
-    "density": {"compact": "Плотный", "normal": "Обычный", "roomy": "Свободный"},
-    "ui_font": {"auto": "Как задумано", "condensed": "Узкий", "regular": "Обычный", "mono": "Моноширинный"},
+    "theme": {"auto": T("Как в системе"), "light": T("Светлая"), "dark": T("Тёмная"), "contrast": T("Контрастная")},
+    "accent": {"blue": T("Синий"), "green": T("Зелёный"), "orange": T("Оранжевый"), "violet": T("Фиолетовый"), "pink": T("Розовый")},
+    "density": {"compact": T("Плотный"), "normal": T("Обычный"), "roomy": T("Свободный")},
+    "ui_font": {"auto": T("Как задумано"), "condensed": T("Узкий"), "regular": T("Обычный"), "mono": T("Моноширинный")},
 }
 FONT_CHOICES = {
     "auto": UI_FONTS,
@@ -506,31 +510,31 @@ def clean_pro(raw):
         try:
             if kind == "bool":
                 if not isinstance(v, bool):
-                    raise ValueError("нужно «да» или «нет»")
+                    raise ValueError(T("нужно «да» или «нет»"))
             elif kind == "int":
                 if isinstance(v, bool) or not isinstance(v, (int, str)) or (isinstance(v, str) and not v.strip().lstrip("-").isdigit()):
-                    raise ValueError("нужно целое число")
+                    raise ValueError(T("нужно целое число"))
                 v = int(v)
                 if not rule[0] <= v <= rule[1]:
-                    raise ValueError(f"число от {rule[0]} до {rule[1]}")
+                    raise ValueError(T("число от {0} до {1}").format(rule[0], rule[1]))
             elif kind == "choice":
                 if v not in rule:
-                    raise ValueError("такого варианта нет")
+                    raise ValueError(T("такого варианта нет"))
             elif kind == "apps":
                 v = " ".join(clean_apps(v))
             elif kind == "color":
                 v = str(v).strip()
                 if v and not re.fullmatch(r"#?[0-9A-Fa-f]{6}", v):
-                    raise ValueError("нужен цвет вида #1E3CFF или пусто")
+                    raise ValueError(T("нужен цвет вида #1E3CFF или пусто"))
                 v = ("#" + v.lstrip("#")).upper() if v else ""
             elif kind == "host":
                 v = str(v).strip()
                 if not _HOST.match(v) or any(int(p) > 255 for p in v.split(".") if v.replace(".", "").isdigit()):
-                    raise ValueError("нужен адрес вида 1.1.1.1 или dns.google")
+                    raise ValueError(T("нужен адрес вида 1.1.1.1 или dns.google"))
             elif kind == "url":
                 v = str(v).strip()
                 if not re.match(r"^https?://[^\s/]+(/\S*)?$", v) or len(v) > 200:
-                    raise ValueError("нужен адрес вида https://…")
+                    raise ValueError(T("нужен адрес вида https://…"))
             out[k] = v
         except ValueError as e:
             errors[k] = str(e)
@@ -595,7 +599,7 @@ def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None
     `pro`: advanced settings (see PRO_FIELDS); missing or wrong values mean the defaults."""
     outs = [o for o in outs if not engines.is_xray(o) or (xray_ports or {}).get(o["tag"])]  # nothing serves the others
     if not outs:
-        raise ValueError("нет серверов")
+        raise ValueError(T("нет серверов"))
     pro = clean_pro(pro)[0]
     outbounds, endpoints = engines.to_singbox(outs, xray_ports)
     tags = [o["tag"] for o in outs]
@@ -798,11 +802,11 @@ def enable_clipboard(w):
             w.icursor("end")
 
     menu = tk.Menu(w, tearoff=0)
-    menu.add_command(label="Вставить", command=lambda: w.event_generate("<<Paste>>"))
-    menu.add_command(label="Копировать", command=lambda: w.event_generate("<<Copy>>"))
-    menu.add_command(label="Вырезать", command=lambda: w.event_generate("<<Cut>>"))
+    menu.add_command(label=T("Вставить"), command=lambda: w.event_generate("<<Paste>>"))
+    menu.add_command(label=T("Копировать"), command=lambda: w.event_generate("<<Copy>>"))
+    menu.add_command(label=T("Вырезать"), command=lambda: w.event_generate("<<Cut>>"))
     menu.add_separator()
-    menu.add_command(label="Выделить всё", command=select_all)
+    menu.add_command(label=T("Выделить всё"), command=select_all)
 
     def popup(e):
         w.focus_set()
@@ -967,7 +971,7 @@ def show_error(parent, text):
     Dialog(parent, text, ["OK"], "error", 0, 0)
 
 
-def ask_yes_no(parent, text, yes="Да", no="Нет"):
+def ask_yes_no(parent, text, yes=T("Да"), no=T("Нет")):
     return Dialog(parent, text, [yes, no], "question", 0, 1).result == 0
 
 
@@ -994,50 +998,50 @@ class Segmented(tk.Frame):
 # (key, label, widget, hint) per section of the advanced settings window; the order here is the order on screen
 PRO_NARROW = ("ui_scale", "border", "win_width", "alpha", "accent_hex")  # short numbers and a colour
 PRO_LAYOUT = (
-    ("Оформление", (
-        ("theme", "Тема", "choice", "«Как в системе» берёт светлую или тёмную у вашей системы."),
-        ("accent", "Цвет акцента", "choice", "В контрастной теме акцент всегда синий, если не задан свой цвет."),
-        ("accent_hex", "Свой цвет акцента", "entry", "Вида #1E3CFF. Если заполнено, берётся он, а не цвет из списка."),
-        ("ui_scale", "Масштаб интерфейса, %", "entry", "От 70 до 180. Поверх масштаба самой системы."),
-        ("density", "Список серверов", "choice", None),
-        ("ui_font", "Шрифт", "choice", "«Как задумано» — узкий шрифт системы; если его нет, берётся ближайший."),
-        ("border", "Толщина рамок, пикселей", "entry", "От 1 до 4."),
-        ("win_width", "Ширина окна, пикселей", "entry", "От 380 до 900. Если не помещается текст, окно станет шире само."),
-        ("shadow", "Тень у большой кнопки", "check", None),
-        ("anim", "Мигающий курсор при подключении", "check", None),
-        ("remember_window", "Помнить, где стояло окно", "check", None),
-        ("on_top", "Окно поверх остальных", "check", None),
-        ("alpha", "Непрозрачность окна, %", "entry", "100 — совсем непрозрачное. На некоторых Linux не работает."),
+    (T("Оформление"), (
+        ("theme", T("Тема"), "choice", T("«Как в системе» берёт светлую или тёмную у вашей системы.")),
+        ("accent", T("Цвет акцента"), "choice", T("В контрастной теме акцент всегда синий, если не задан свой цвет.")),
+        ("accent_hex", T("Свой цвет акцента"), "entry", T("Вида #1E3CFF. Если заполнено, берётся он, а не цвет из списка.")),
+        ("ui_scale", T("Масштаб интерфейса, %"), "entry", T("От 70 до 180. Поверх масштаба самой системы.")),
+        ("density", T("Список серверов"), "choice", None),
+        ("ui_font", T("Шрифт"), "choice", T("«Как задумано» — узкий шрифт системы; если его нет, берётся ближайший.")),
+        ("border", T("Толщина рамок, пикселей"), "entry", T("От 1 до 4.")),
+        ("win_width", T("Ширина окна, пикселей"), "entry", T("От 380 до 900. Если не помещается текст, окно станет шире само.")),
+        ("shadow", T("Тень у большой кнопки"), "check", None),
+        ("anim", T("Мигающий курсор при подключении"), "check", None),
+        ("remember_window", T("Помнить, где стояло окно"), "check", None),
+        ("on_top", T("Окно поверх остальных"), "check", None),
+        ("alpha", T("Непрозрачность окна, %"), "entry", T("100 — совсем непрозрачное. На некоторых Linux не работает.")),
     )),
-    ("Программы", (
-        ("bypass_apps", "Эти программы работают мимо VPN", "entry", "Имена через пробел, например: steam.exe telegram.exe. Нужно, если программа с VPN не работает или тормозит."),
-        ("vpn_only_apps", "Через VPN только эти программы", "entry", "Если заполнено, через VPN идут только они, всё остальное напрямую. Имена так же, через пробел."),
+    (T("Программы"), (
+        ("bypass_apps", T("Эти программы работают мимо VPN"), "entry", T("Имена через пробел, например: steam.exe telegram.exe. Нужно, если программа с VPN не работает или тормозит.")),
+        ("vpn_only_apps", T("Через VPN только эти программы"), "entry", T("Если заполнено, через VPN идут только они, всё остальное напрямую. Имена так же, через пробел.")),
     )),
-    ("Соединение", (
-        ("mixed_port", "Порт локального прокси", "entry", "Для программ, которым нужен адрес прокси: 127.0.0.1 и этот порт."),
-        ("tun_stack", "Режим сетевого адаптера", "choice", "Если сайты не открываются или тормозят, попробуй system или gvisor."),
-        ("strict_route", "Не пускать трафик в обход VPN", "check", None),
-        ("autoconnect", "Подключаться сразу при запуске программы", "check", "Вместе с «Запускать при входе в систему» VPN включается сам, как только вы вошли, а окно прячется в трей."),
-        ("merge_subs", "Спрашивать подписку как разные программы и объединять серверы", "check", "Провайдер отдаёт разным программам разные списки: так в списке будет больше серверов. Если провайдер считает запросы, выключи."),
-        ("use_xray", "Запускать Xray для серверов XHTTP и похожих", "check", "Их ядро не умеет, поэтому рядом работает Xray. Без файла Xray или с выключенной галочкой такие серверы пропускаются."),
-        ("auto_reconnect", "Подключаться заново, если соединение оборвалось", "check", None),
+    (T("Соединение"), (
+        ("mixed_port", T("Порт локального прокси"), "entry", T("Для программ, которым нужен адрес прокси: 127.0.0.1 и этот порт.")),
+        ("tun_stack", T("Режим сетевого адаптера"), "choice", T("Если сайты не открываются или тормозят, попробуй system или gvisor.")),
+        ("strict_route", T("Не пускать трафик в обход VPN"), "check", None),
+        ("autoconnect", T("Подключаться сразу при запуске программы"), "check", T("Вместе с «Запускать при входе в систему» VPN включается сам, как только вы вошли, а окно прячется в трей.")),
+        ("merge_subs", T("Спрашивать подписку как разные программы и объединять серверы"), "check", T("Провайдер отдаёт разным программам разные списки: так в списке будет больше серверов. Если провайдер считает запросы, выключи.")),
+        ("use_xray", T("Запускать Xray для серверов XHTTP и похожих"), "check", T("Их ядро не умеет, поэтому рядом работает Xray. Без файла Xray или с выключенной галочкой такие серверы пропускаются.")),
+        ("auto_reconnect", T("Подключаться заново, если соединение оборвалось"), "check", None),
     )),
     ("DNS", (
-        ("dns_remote", "DNS через VPN", "entry", "Адрес или имя DNS-сервера для обычных сайтов."),
-        ("dns_local", "DNS для российских сайтов", "entry", "Работает мимо VPN, когда включено «Российские сайты напрямую»."),
+        ("dns_remote", T("DNS через VPN"), "entry", T("Адрес или имя DNS-сервера для обычных сайтов.")),
+        ("dns_local", T("DNS для российских сайтов"), "entry", T("Работает мимо VPN, когда включено «Российские сайты напрямую».")),
     )),
-    ("Быстрейший из списка", (
-        ("auto_url", "Адрес для проверки отклика", "entry", None),
-        ("auto_interval", "Проверять каждые, минут", "entry", None),
-        ("auto_tolerance", "Менять сервер, если другой лучше на, мс", "entry", "Больше число: реже переключений."),
+    (T("Быстрейший из списка"), (
+        ("auto_url", T("Адрес для проверки отклика"), "entry", None),
+        ("auto_interval", T("Проверять каждые, минут"), "entry", None),
+        ("auto_tolerance", T("Менять сервер, если другой лучше на, мс"), "entry", T("Больше число: реже переключений.")),
     )),
-    ("Тест скорости", (
-        ("test_top", "У скольких лучших по пингу мерить скорость", "entry", None),
-        ("test_secs", "Секунд на каждый сервер", "entry", None),
-        ("test_parallel", "Сколько серверов пинговать одновременно", "entry", "Скорость всегда меряется по одному серверу: иначе они делят канал и цифры врут."),
+    (T("Тест скорости"), (
+        ("test_top", T("У скольких лучших по пингу мерить скорость"), "entry", None),
+        ("test_secs", T("Секунд на каждый сервер"), "entry", None),
+        ("test_parallel", T("Сколько серверов пинговать одновременно"), "entry", T("Скорость всегда меряется по одному серверу: иначе они делят канал и цифры врут.")),
     )),
-    ("Журнал", (
-        ("log_level", "Подробность журнала ядра", "choice", "debug пишет всё подряд, error только ошибки."),
+    (T("Журнал"), (
+        ("log_level", T("Подробность журнала ядра"), "choice", T("debug пишет всё подряд, error только ошибки.")),
     )),
 )
 
@@ -1064,10 +1068,10 @@ class Preview(tk.Canvas):
         if o:
             self.create_rectangle(P(8) + o, P(8) + o, x1 + o, y1 + o, fill=t["INK"], outline=t["INK"])
         self.create_rectangle(P(8), P(8), x1, y1, fill=t["PAPER"], outline=t["INK"], width=max(1, int(bw * 1.5)))
-        self.create_text(P(22), P(26), text="Подключить", anchor="w", fill=t["INK"], font=(self.family, 15, "bold"))
-        self.create_text(P(22), P(47), text="Быстрейший из списка", anchor="w", fill=t["MUTE"], font=(self.family, 9))
+        self.create_text(P(22), P(26), text=T("Подключить"), anchor="w", fill=t["INK"], font=(self.family, 15, "bold"))
+        self.create_text(P(22), P(47), text=T("Быстрейший из списка"), anchor="w", fill=t["MUTE"], font=(self.family, 9))
         bx = P(8)
-        for text, fill, fg in (("Обновить", t["PAPER"], t["INK"]), ("Выбрано", t["BLUE"], t["ONACCENT"]), ("Ошибка", t["RED"], t["ONACCENT"])):
+        for text, fill, fg in ((T("Обновить"), t["PAPER"], t["INK"]), (T("Выбрано"), t["BLUE"], t["ONACCENT"]), (T("Ошибка"), t["RED"], t["ONACCENT"])):
             tw = P(78)
             self.create_rectangle(bx, P(74), bx + tw, P(98), fill=t["INK"], outline=t["INK"])
             self.create_rectangle(bx + bw, P(74) + bw, bx + tw - bw, P(98) - bw, fill=fill, outline=fill)
@@ -1082,7 +1086,7 @@ class ProWindow(tk.Toplevel):
     def __init__(self, app):
         super().__init__(app)
         self.app = app
-        self.title(TITLE + " · расширенные настройки")
+        self.title(TITLE + T(" · расширенные настройки"))
         self.configure(bg=BG)
         try:
             if IS_WIN:
@@ -1109,14 +1113,14 @@ class ProWindow(tk.Toplevel):
         pad = tk.Frame(body, bg=BG)
         pad.pack(fill="both", expand=True, padx=P(22), pady=P(18))
 
-        tk.Label(pad, text="Расширенные настройки", font=f_h, bg=BG, fg=INK).pack(anchor="w")
+        tk.Label(pad, text=T("Расширенные настройки"), font=f_h, bg=BG, fg=INK).pack(anchor="w")
         self.preview = None
-        tk.Label(pad, text="Для опытных пользователей. Обычно здесь ничего менять не нужно. Если значение не подойдёт, "
-                           "программа вернёт обычное и всё равно подключится.", font=f_s, bg=BG, fg=MUTE, wraplength=P(500),
+        tk.Label(pad, text=T("Для опытных пользователей. Обычно здесь ничего менять не нужно. Если значение не подойдёт, "
+                           "программа вернёт обычное и всё равно подключится."), font=f_s, bg=BG, fg=MUTE, wraplength=P(500),
                  justify="left", anchor="w").pack(anchor="w", pady=(P(4), 0))
         for title, rows in PRO_LAYOUT:
             tk.Label(pad, text=title, font=f_h, bg=BG, fg=INK).pack(anchor="w", pady=(P(18), P(6)))
-            if title == "Оформление":
+            if title == T("Оформление"):
                 self.preview = Preview(pad, fam, lambda: self.vars)
                 self.preview.pack(fill="x", pady=(0, P(10)))
             for key, label, kind, hint in rows:
@@ -1132,14 +1136,14 @@ class ProWindow(tk.Toplevel):
         foot.pack(fill="x", padx=P(22), pady=P(14))
         tools = tk.Frame(foot, bg=BG)
         tools.pack(fill="x")
-        Flat(tools, "По умолчанию", self.reset, f_s).pack(side="left")
-        Flat(tools, "Папка данных", lambda: self.tool(DATA), f_s).pack(side="left", padx=(P(8), 0))
-        Flat(tools, "Журнал", lambda: self.tool(LOGFILE), f_s).pack(side="left", padx=(P(8), 0))
+        Flat(tools, T("По умолчанию"), self.reset, f_s).pack(side="left")
+        Flat(tools, T("Папка данных"), lambda: self.tool(DATA), f_s).pack(side="left", padx=(P(8), 0))
+        Flat(tools, T("Журнал"), lambda: self.tool(LOGFILE), f_s).pack(side="left", padx=(P(8), 0))
         acts = tk.Frame(foot, bg=BG)
         acts.pack(fill="x", pady=(P(8), 0))
-        Flat(acts, "Закрыть", self.close, f_s).pack(side="right")
-        Flat(acts, "Применить", self.apply, f_s, primary=True).pack(side="right", padx=(0, P(8)))
-        self.restart_btn = Flat(acts, "Перезапустить", self.restart, f_s)  # shown once something needs a restart
+        Flat(acts, T("Закрыть"), self.close, f_s).pack(side="right")
+        Flat(acts, T("Применить"), self.apply, f_s, primary=True).pack(side="right", padx=(0, P(8)))
+        self.restart_btn = Flat(acts, T("Перезапустить"), self.restart, f_s)  # shown once something needs a restart
 
         self.bind("<Escape>", lambda e: self.close())
         self.protocol("WM_DELETE_WINDOW", self.close)
@@ -1203,19 +1207,19 @@ class ProWindow(tk.Toplevel):
         if errors:
             k = next(iter(errors))
             label = self.labels[k].cget("text") if k in self.labels else k
-            self.msg.config(text=f"Не сохранено. {label}: {errors[k]}.", fg=RED)
+            self.msg.config(text=T("Не сохранено. {0}: {1}.").format(label, errors[k]), fg=RED)
             return False
         self.app.cfg["pro"] = {k: v for k, v in clean.items() if v != PRO_DEFAULTS[k]}  # only what differs from the defaults
         self.app.save(sources=False)
         for k, var in self.vars.items():
             var.set(clean[k] if isinstance(var, tk.BooleanVar) else str(clean[k]))
         self.app.apply_live()
-        note = "Сохранено."
+        note = T("Сохранено.")
         if self.app.state != "off":
-            note += " Настройки соединения заработают при следующем подключении."
-            self.app.say("Расширенные настройки сохранены. Настройки соединения заработают при следующем подключении.")
+            note += T(" Настройки соединения заработают при следующем подключении.")
+            self.app.say(T("Расширенные настройки сохранены. Настройки соединения заработают при следующем подключении."))
         if any(clean[k] != self.app.design[k] for k in RESTART_KEYS):
-            note += " Тема, цвета, масштаб, шрифт и рамки применятся после перезапуска программы."
+            note += T(" Тема, цвета, масштаб, шрифт и рамки применятся после перезапуска программы.")
             self.restart_btn.pack(side="right", padx=(0, P(8)))
         else:
             self.restart_btn.pack_forget()
@@ -1229,13 +1233,13 @@ class ProWindow(tk.Toplevel):
     def reset(self):
         for k, var in self.vars.items():
             var.set(PRO_DEFAULTS[k] if isinstance(var, tk.BooleanVar) else str(PRO_DEFAULTS[k]))
-        self.msg.config(text="Поля вернулись к обычным значениям. Нажми «Применить», чтобы сохранить.", fg=MUTE)
+        self.msg.config(text=T("Поля вернулись к обычным значениям. Нажми «Применить», чтобы сохранить."), fg=MUTE)
 
     def tool(self, path):
         if os.path.exists(path) and open_path(path):
             return
-        self.msg.config(text="Этого файла ещё нет: он появится после первого подключения." if path == LOGFILE
-                        else "Не получилось открыть.", fg=RED)
+        self.msg.config(text=T("Этого файла ещё нет: он появится после первого подключения.") if path == LOGFILE
+                        else T("Не получилось открыть."), fg=RED)
 
     def close(self):
         self.app.pro_win = None
@@ -1341,7 +1345,7 @@ class Power(tk.Canvas):
         fg = ONACCENT if on else INK
         sub = SUBON if on else MUTE
         self.create_rectangle(d + 2, d + 2, x1, y1, fill=fill, outline=INK, width=max(1, int(round(BORDER * 1.5 * S))))
-        title = {"off": "Подключить", "connecting": "Подключаю", "on": "Отключить"}[self.state]
+        title = {"off": T("Подключить"), "connecting": T("Подключаю"), "on": T("Отключить")}[self.state]
         if self.state == "connecting":
             title += " █" if self.blink else ""
         self.create_text(d + P(24), d + P(40), text=title, anchor="w", fill=fg, font=(self.fam, FZ(24), "bold"))
@@ -1410,7 +1414,7 @@ def core_check(cfg_path):
     try:
         chk = subprocess.run([CORE, "check", "-c", cfg_path], capture_output=True, text=True, creationflags=NOWIN, timeout=60)
     except (OSError, subprocess.SubprocessError) as e:  # core missing (antivirus), blocked, hung
-        return False, f"ядро не запускается: {e}"
+        return False, T("ядро не запускается: {0}").format(e)
     return chk.returncode == 0, strip_ansi(chk.stderr or chk.stdout).strip()
 
 
@@ -1722,7 +1726,7 @@ def xray_check(cfg_path):
     try:
         r = subprocess.run([XRAY, "run", "-test", "-format", "json", "-c", cfg_path], capture_output=True, text=True, creationflags=NOWIN, timeout=30)
     except (OSError, subprocess.SubprocessError) as e:
-        return False, f"Xray не запускается: {e}"
+        return False, T("Xray не запускается: {0}").format(e)
     return r.returncode == 0, strip_ansi(r.stdout + r.stderr).strip()
 
 
@@ -1734,7 +1738,7 @@ def launch_xray(outs, base_port, cfg_path, log_path, nic=None):
     if not xs:
         return None, {}, ""
     if not os.path.isfile(XRAY):
-        return None, {}, "Серверы XHTTP и похожие пропущены: рядом с программой нет файла Xray (скорее всего, его удалил антивирус)."
+        return None, {}, T("Серверы XHTTP и похожие пропущены: рядом с программой нет файла Xray (скорее всего, его удалил антивирус).")
     try:
         open(log_path, "w").close()
     except OSError:
@@ -1759,23 +1763,23 @@ def launch_xray(outs, base_port, cfg_path, log_path, nic=None):
             if xray_check(cfg_path)[0]:
                 keep.append(o)
         if len(keep) < len(good):
-            note = f"Пропущено серверов, которые Xray не принял: {len(good) - len(keep)}."
+            note = T("Пропущено серверов, которые Xray не принял: {0}.").format(len(good) - len(keep))
         good = keep
         if not good:
-            return None, {}, note or "Серверы XHTTP и похожие пропущены: Xray их не принял."
+            return None, {}, note or T("Серверы XHTTP и похожие пропущены: Xray их не принял.")
     if not ok:
-        return None, {}, "Серверы XHTTP и похожие пропущены: Xray не принял настройки."
+        return None, {}, T("Серверы XHTTP и похожие пропущены: Xray не принял настройки.")
     try:
         proc = subprocess.Popen([XRAY, "run", "-format", "json", "-c", cfg_path], cwd=DATA, creationflags=NOWIN,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as e:
-        return None, {}, f"Серверы XHTTP и похожие пропущены: Xray не запустился ({e})."
+        return None, {}, T("Серверы XHTTP и похожие пропущены: Xray не запустился ({0}).").format(e)
     own(proc)
     end = time.time() + 8
     pending = set(ports.values())
     while pending and time.time() < end:
         if proc.poll() is not None:
-            return None, {}, "Серверы XHTTP и похожие пропущены: Xray сразу закрылся (его мог остановить антивирус)."
+            return None, {}, T("Серверы XHTTP и похожие пропущены: Xray сразу закрылся (его мог остановить антивирус).")
         for pt in list(pending):
             try:
                 socket.create_connection(("127.0.0.1", pt), 0.3).close()
@@ -1786,7 +1790,7 @@ def launch_xray(outs, base_port, cfg_path, log_path, nic=None):
             time.sleep(0.2)
     if pending:
         stop_proc(proc)
-        return None, {}, "Серверы XHTTP и похожие пропущены: Xray не ответил."
+        return None, {}, T("Серверы XHTTP и похожие пропущены: Xray не ответил.")
     return proc, ports, note
 
 
@@ -1978,12 +1982,12 @@ def probe_speed(port, secs=4.0, urls=None):
 
 def fmt_ping(ms):
     """None = not tested yet, negative = tested and unreachable."""
-    return "" if ms is None else ("нет" if ms < 0 else f"{ms:.0f} мс")
+    return "" if ms is None else (T("нет") if ms < 0 else T("{0:.0f} мс").format(ms))
 
 
 def fmt_speed(v):
     """None = not tested yet, negative = tested but no download source answered."""
-    return "" if v is None else ("—" if v < 0 else (f"{v:.0f} Мбит/с" if v >= 10 else f"{v:.1f} Мбит/с"))
+    return "" if v is None else ("—" if v < 0 else (T("{0:.0f} Мбит/с").format(v) if v >= 10 else T("{0:.1f} Мбит/с").format(v)))
 
 
 class App(tk.Tk):
@@ -2003,8 +2007,8 @@ class App(tk.Tk):
                 return
             self._last_err = time.time()
             try:
-                show_error(self, "Что-то пошло не так, но программа продолжает работать.\n\nЕсли это повторяется, пришли "
-                                 "файл crash.log из папки:\n" + DATA + "\n\nТехническая причина: " + str(a[1])[:200])
+                show_error(self, T("Что-то пошло не так, но программа продолжает работать.\n\nЕсли это повторяется, пришли "
+                                 "файл crash.log из папки:\n") + DATA + T("\n\nТехническая причина: ") + str(a[1])[:200])
             except Exception:  # noqa: BLE001
                 pass
         self.report_callback_exception = on_error
@@ -2128,7 +2132,7 @@ class App(tk.Tk):
             self.bind_all(ev, self.on_body_wheel, add="+")
 
         if IS_WIN and not is_admin():
-            tk.Label(root, text="Нужны права администратора", font=self.f_s, bg=RED, fg=ONACCENT,
+            tk.Label(root, text=T("Нужны права администратора"), font=self.f_s, bg=RED, fg=ONACCENT,
                      padx=P(8), pady=P(4)).pack(fill="x", pady=(0, P(12)))
 
         self.power = Power(root, self.toggle, fam)
@@ -2138,10 +2142,10 @@ class App(tk.Tk):
         self.status.pack(fill="x", pady=(P(6), 0))
 
         # servers
-        row = self.section(root, "Серверы")
+        row = self.section(root, T("Серверы"))
         self.count = tk.Label(row, text="", font=self.f_s, bg=BG, fg=MUTE)
         self.count.pack(side="right", padx=(P(10), 0))
-        self.test_btn = Flat(row, "Тест скорости", self.run_test, self.f_s)
+        self.test_btn = Flat(row, T("Тест скорости"), self.run_test, self.f_s)
         self.test_btn.pack(side="right")
         frame = tk.Frame(root, bg=INK, padx=BW(), pady=BW())
         frame.pack(fill="both", expand=True)
@@ -2149,7 +2153,7 @@ class App(tk.Tk):
                                  selectmode="browse", height=6)
         self.tree.column("#0", anchor="w", stretch=True, width=P(170))  # flag + server name
         meter = tkfont.Font(self, font=self.f_b)
-        self.col_w = {"ping": meter.measure("0000 мс") + P(20), "speed": meter.measure("000 Мбит/с") + P(20),
+        self.col_w = {"ping": meter.measure(T("0000 мс")) + P(20), "speed": meter.measure(T("000 Мбит/с")) + P(20),
                       "proto": max(meter.measure(n) for n in list(PROTO.values()) + ["XHTTP", "MKCP", "TROJAN+"]) + P(20)}
         self.tree.column("ping", anchor="e", width=self.col_w["ping"], stretch=False)
         self.tree.column("speed", anchor="e", width=self.col_w["speed"], stretch=False)
@@ -2165,15 +2169,15 @@ class App(tk.Tk):
         self.tree.bind("<Button-2>" if IS_MAC else "<Button-3>", self.row_menu)
         if IS_MAC:
             self.tree.bind("<Control-Button-1>", self.row_menu)
-        self.empty = tk.Label(frame, text="Серверов пока нет.\n\nВставь ссылку подписки или ключ в поле «Подписки» ниже "
-                                          "и нажми «Обновить».", font=self.f_s, bg=PAPER, fg=MUTE, justify="center", wraplength=P(300))
+        self.empty = tk.Label(frame, text=T("Серверов пока нет.\n\nВставь ссылку подписки или ключ в поле «Подписки» ниже "
+                                          "и нажми «Обновить»."), font=self.f_s, bg=PAPER, fg=MUTE, justify="center", wraplength=P(300))
         self.tree.bind("<Double-1>", lambda e: self.toggle() if self.state == "off" else None)
 
         # routing
-        self.section(root, "Маршрут")
+        self.section(root, T("Маршрут"))
         self.ru = tk.BooleanVar(value=self.cfg["ru_direct"])
-        Check(root, "Российские сайты напрямую, без VPN", self.ru, self.f_b).pack(anchor="w")
-        tk.Label(root, text="Свои домены напрямую, через пробел", font=self.f_s, bg=BG, fg=MUTE,
+        Check(root, T("Российские сайты напрямую, без VPN"), self.ru, self.f_b).pack(anchor="w")
+        tk.Label(root, text=T("Свои домены напрямую, через пробел"), font=self.f_s, bg=BG, fg=MUTE,
                  anchor="w").pack(fill="x", pady=(P(10), P(4)))
         eb = tk.Frame(root, bg=INK, padx=BW(), pady=BW())
         eb.pack(fill="x")
@@ -2185,9 +2189,9 @@ class App(tk.Tk):
         self.extra.insert(0, self.cfg["extra"])
 
         # subscriptions
-        row = self.section(root, "Подписки")
-        Flat(row, "Обновить", self.load, self.f_s).pack(side="right")
-        Flat(row, "Вставить", self.paste_clip, self.f_s).pack(side="right", padx=(0, P(8)))
+        row = self.section(root, T("Подписки"))
+        Flat(row, T("Обновить"), self.load, self.f_s).pack(side="right")
+        Flat(row, T("Вставить"), self.paste_clip, self.f_s).pack(side="right", padx=(0, P(8)))
         self.sub_note = tk.Label(row, text="", font=self.f_s, bg=BG, fg=MUTE)
         self.sub_note.pack(side="left", padx=(P(10), 0))
         sbx = self.sbx = tk.Frame(root, bg=INK, padx=BW(), pady=BW())  # last block of the content; the panels open right below it
@@ -2198,8 +2202,8 @@ class App(tk.Tk):
         self.src.pack(fill="x")
         self.src.insert("1.0", self.cfg["sources"])
         self.usage = tk.Label(root, text="", font=self.f_s, bg=BG, fg=MUTE, anchor="w", justify="left", wraplength=P(430))  # shown above the box when a provider reports traffic or an expiry date
-        self.src_hint = tk.Label(self.src, text="Ссылка подписки (https://…) или ключ (vless://, vmess://, trojan://, ss://, hysteria2://…). "
-                                                "Можно вставить несколько, по одной в строке.", font=(self.fam, FZ(9)), bg=PAPER, fg=MUTE,
+        self.src_hint = tk.Label(self.src, text=T("Ссылка подписки (https://…) или ключ (vless://, vmess://, trojan://, ss://, hysteria2://…). "
+                                                "Можно вставить несколько, по одной в строке."), font=(self.fam, FZ(9)), bg=PAPER, fg=MUTE,
                                  justify="left", anchor="w", wraplength=P(380), cursor="xterm")
         self.src_hint.bind("<Button-1>", lambda e: self.src.focus_set())
         for ev in ("<KeyRelease>", "<FocusIn>", "<FocusOut>", "<ButtonRelease-1>"):
@@ -2218,37 +2222,37 @@ class App(tk.Tk):
         self.v_flags = tk.BooleanVar(value=bool(self.cfg.get("show_flags", True)))
         self.v_ping = tk.BooleanVar(value=bool(self.cfg.get("show_ping", True)))
         self.v_speed = tk.BooleanVar(value=bool(self.cfg.get("show_speed", True)))
-        for text, var in (("Флаги стран", self.v_flags), ("Пинг: показывать и измерять", self.v_ping),
-                          ("Скорость: показывать и измерять", self.v_speed)):
+        for text, var in ((T("Флаги стран"), self.v_flags), (T("Пинг: показывать и измерять"), self.v_ping),
+                          (T("Скорость: показывать и измерять"), self.v_speed)):
             Check(self.set_box, text, var, self.f_b).pack(anchor="w", pady=(0, P(2)))
             var.trace_add("write", self.on_view_toggle)
         self.v_skip = tk.BooleanVar(value=bool(self.cfg.get("skip_home", True)))
-        Check(self.set_box, "Автовыбор: пропускать серверы России, если я в России", self.v_skip,
+        Check(self.set_box, T("Автовыбор: пропускать серверы России, если я в России"), self.v_skip,
               self.f_b).pack(anchor="w", pady=(0, P(2)))
         self.v_skip.trace_add("write", self.on_skip_toggle)
         self.v_tray =tk.BooleanVar(value=bool(self.cfg.get("tray_on_close", True)))
         if self.tray_ok:
-            Check(self.set_box, "Закрытие окна сворачивает в трей", self.v_tray, self.f_b).pack(anchor="w", pady=(0, P(2)))
+            Check(self.set_box, T("Закрытие окна сворачивает в трей"), self.v_tray, self.f_b).pack(anchor="w", pady=(0, P(2)))
             self.v_tray.trace_add("write", lambda *a: (self.cfg.update(tray_on_close=self.v_tray.get()),
                                                        self.save(sources=False)))
         self.v_login = tk.BooleanVar(value=bool(self.cfg.get("autostart", False)))
         if autostart_command() is not None:  # only the packaged program has something to start
-            Check(self.set_box, "Запускать при входе в систему", self.v_login, self.f_b).pack(anchor="w", pady=(0, P(2)))
+            Check(self.set_box, T("Запускать при входе в систему"), self.v_login, self.f_b).pack(anchor="w", pady=(0, P(2)))
             self.v_login.trace_add("write", self.on_login_toggle)
         urow = tk.Frame(self.set_box, bg=BG)
         urow.pack(fill="x", pady=(P(8), 0))
         self.upd_var = tk.BooleanVar(value=bool(self.cfg.get("auto_update")))
-        Check(urow, "Обновлять программу автоматически", self.upd_var, self.f_s).pack(side="left")
-        self.upd_btn = Flat(urow, "Проверить", self.on_upd_click, self.f_s)
+        Check(urow, T("Обновлять программу автоматически"), self.upd_var, self.f_s).pack(side="left")
+        self.upd_btn = Flat(urow, T("Проверить"), self.on_upd_click, self.f_s)
         self.upd_btn.pack(side="right")
         self.upd_var.trace_add("write", self.on_upd_toggle)
-        tk.Label(self.set_box, text="Для опытных: двойной щелчок по «Настройки» открывает расширенные настройки.",
+        tk.Label(self.set_box, text=T("Для опытных: двойной щелчок по «Настройки» открывает расширенные настройки."),
                  font=self.f_s, bg=BG, fg=MUTE, anchor="w", justify="left", wraplength=P(430)).pack(fill="x", pady=(P(8), 0))
 
         # footer: deliberately quiet. Small grey links; the version on the right.
-        self.log_head = self.quiet_link(self.foot, "Лог", self.toggle_log)
+        self.log_head = self.quiet_link(self.foot, T("Лог"), self.toggle_log)
         self.log_head.pack(side="left")
-        self.set_head = self.quiet_link(self.foot, "Настройки", self.toggle_settings, double=self.open_pro)
+        self.set_head = self.quiet_link(self.foot, T("Настройки"), self.toggle_settings, double=self.open_pro)
         self.set_head.pack(side="left", padx=(P(16), 0))
         tk.Label(self.foot, text=f"v{updater.VERSION}", font=self.f_s, bg=BG, fg=MUTE).pack(side="right")
 
@@ -2263,7 +2267,7 @@ class App(tk.Tk):
             try:
                 n = kill_stale_cores({p.pid for p in (self.proc, self.test_proc) if p})
                 if n:
-                    self._ui(lambda: self.say("Закрыл остатки прошлого запуска VPN."))
+                    self._ui(lambda: self.say(T("Закрыл остатки прошлого запуска VPN.")))
             finally:
                 self.clean_done.set()
         threading.Thread(target=clean, daemon=True).start()
@@ -2289,10 +2293,10 @@ class App(tk.Tk):
         if not self.frozen():
             return  # running from source: there is no program file to replace
         if self.cfg.get("auto_update") is None:
-            yes = ask_yes_no(self, "Обновлять программу автоматически?\n\n"
+            yes = ask_yes_no(self, T("Обновлять программу автоматически?\n\n"
                        "Когда на GitHub выйдет новая версия, программа скачает её, проверит контрольную сумму и "
                        "установит при следующем запуске. Ничего о тебе не отправляется.\n\n"
-                       "Это можно включить и выключить внизу окна.")
+                       "Это можно включить и выключить внизу окна."))
             self.upd_var.set(bool(yes))  # the trace saves the choice
             self.cfg["auto_update"] = bool(yes)
             self.save(sources=False)
@@ -2316,11 +2320,11 @@ class App(tk.Tk):
             return
         if not self.frozen():
             if manual:
-                self.say("Обновление работает в собранной программе, а не при запуске из исходников.")
+                self.say(T("Обновление работает в собранной программе, а не при запуске из исходников."))
             return
         self.upd_busy = True
         if manual:
-            self.say("Проверяю обновления…")
+            self.say(T("Проверяю обновления…"))
 
         def work():
             upd = got = err = None
@@ -2336,22 +2340,21 @@ class App(tk.Tk):
     def update_done(self, upd, got, err, manual):
         self.upd_busy = False
         if err:
-            return self.say("Не удалось проверить обновления. Проверь интернет и попробуй позже.", err=True) if manual else None
+            return self.say(T("Не удалось проверить обновления. Проверь интернет и попробуй позже."), err=True) if manual else None
         if not upd:
-            return self.say(f"Установлена последняя версия ({updater.VERSION}).") if manual else None
+            return self.say(T("Установлена последняя версия ({0}).").format(updater.VERSION)) if manual else None
         self.pending = got
-        self.upd_btn.config(text=f"Установить {upd['version']}")
+        self.upd_btn.config(text=T("Установить {0}").format(upd['version']))
         if manual:
-            if ask_yes_no(self, f"Версия {upd['version']} скачана и проверена.\nУстановить сейчас? "
-                                          "Программа перезапустится."):
+            if ask_yes_no(self, T("Версия {0} скачана и проверена.\nУстановить сейчас? Программа перезапустится.").format(upd['version'])):
                 return self.install_now()
-        self.say(f"Версия {upd['version']} скачана. " + ("Установится при следующем запуске."
-                                                         if self.cfg.get("auto_update") else "Нажми «Установить»."))
+        self.say(T("Версия {0} скачана. ").format(upd['version']) + (T("Установится при следующем запуске.")
+                                                         if self.cfg.get("auto_update") else T("Нажми «Установить».")))
 
     def install_now(self):
         if self.installing:
             return  # a second click while the first install is on its way
-        if self.state != "off" and not ask_yes_no(self, "VPN отключится на время обновления. Продолжить?"):
+        if self.state != "off" and not ask_yes_no(self, T("VPN отключится на время обновления. Продолжить?")):
             return
         self.installing = True
         self.save()
@@ -2362,7 +2365,7 @@ class App(tk.Tk):
             self.destroy()  # the loop ends and the process with it; the helper swaps the files and starts the new copy
             return
         self.installing = False
-        self.say("Не удалось установить обновление. Скачай новую версию с GitHub вручную.", err=True)
+        self.say(T("Не удалось установить обновление. Скачай новую версию с GitHub вручную."), err=True)
 
     # ----- small helpers -----
     def section(self, parent, title):
@@ -2590,10 +2593,10 @@ class App(tk.Tk):
 
     def test_label(self):
         if self.v_speed.get():
-            return "Тест скорости"
+            return T("Тест скорости")
         if self.v_ping.get():
-            return "Тест пинга"
-        return "Определить страны" if self.v_flags.get() else "Тест"
+            return T("Тест пинга")
+        return T("Определить страны") if self.v_flags.get() else T("Тест")
 
     def say(self, text, err=False):
         self.status.config(text=text, fg=RED if err else MUTE)
@@ -2629,7 +2632,7 @@ class App(tk.Tk):
         self.save(sources=False)
         self.paint_rows()
         if self.state != "off" and self.chosen() == "AUTO":
-            self.say("Автовыбор учтёт это при следующем подключении.")
+            self.say(T("Автовыбор учтёт это при следующем подключении."))
 
     def is_home_exit(self, o):
         """Does this server exit in the user's own blocking country? Such a server bypasses nothing."""
@@ -2700,7 +2703,7 @@ class App(tk.Tk):
         label = self.active if self.state != "off" else self.sel_name()  # what the user picked
         if self.state == "on" and self.current:  # the server the core is really on (auto mode switches by itself)
             shown = flags.strip_flag(self.current)
-            name = f"Авто: {shown}" if self.chosen() == "AUTO" else shown
+            name = T("Авто: {0}").format(shown) if self.chosen() == "AUTO" else shown
             flag = self.flag_for_tag(self.current)
         elif label == AUTO_LABEL:
             name, flag = label, self.flagimgs.get("AUTO")
@@ -2725,7 +2728,7 @@ class App(tk.Tk):
         try:
             txt = self.clipboard_get()
         except tk.TclError:
-            return show_info(self, "Буфер обмена пуст.")
+            return show_info(self, T("Буфер обмена пуст."))
         cur = self.src.get("1.0", "end").strip()
         self.src.delete("1.0", "end")
         self.src.insert("1.0", (cur + "\n" if cur else "") + txt.strip())
@@ -2745,7 +2748,7 @@ class App(tk.Tk):
         manual = only is None
         if self.testing:
             if manual:
-                self.say("Идёт тест скорости. Дождись конца или остановь его.", err=True)
+                self.say(T("Идёт тест скорости. Дождись конца или остановь его."), err=True)
             return
         if self.loading:
             self.reload_pending = self.reload_pending or manual
@@ -2757,7 +2760,7 @@ class App(tk.Tk):
                 self.src.delete("1.0", "end")
                 self.src.insert("1.0", tidy)
             self.cfg["sources"] = tidy or raw
-            self.count.config(text="Загрузка…")
+            self.count.config(text=T("Загрузка…"))
         urls, inline = split_sources(self.cfg["sources"])
         targets = urls if manual else [u for u in only if u in urls]
         prefer = {u: self.subs.get(u, {}).get("ua") for u in targets}
@@ -2765,7 +2768,7 @@ class App(tk.Tk):
         via = f"http://127.0.0.1:{self.mixed_active}" if self.state == "on" and self.mixed_active else None
         merge = bool(self.pro()["merge_subs"])
         self.loading = True
-        self.sub_note.config(text="обновляю…")
+        self.sub_note.config(text=T("обновляю…"))
 
         def work():
             got = {u: fetch_source(u, prefer[u], via, merge) for u in targets}
@@ -2816,16 +2819,16 @@ class App(tk.Tk):
         self.tree.delete(*self.tree.get_children())
         self.note_subs()
         if not outs:
-            self.count.config(text="Пусто")
+            self.count.config(text=T("Пусто"))
             self.sync_hints()
-            self.say("Серверов нет. Проверь ссылку или ключ.", err=True)
+            self.say(T("Серверов нет. Проверь ссылку или ключ."), err=True)
             if manual and not silent:
-                show_error(self, "Не удалось получить серверы.\n\nЧто сделать: проверь, что ссылка подписки скопирована целиком "
-                                     "(она начинается с https://) и что есть интернет, потом нажми «Обновить».\n\n" +
-                                     ("\n".join(errors) if errors else "Серверов в ответе нет."))
+                show_error(self, T("Не удалось получить серверы.\n\nЧто сделать: проверь, что ссылка подписки скопирована целиком "
+                                     "(она начинается с https://) и что есть интернет, потом нажми «Обновить».\n\n") +
+                                     ("\n".join(errors) if errors else T("Серверов в ответе нет.")))
             return
         if manual:
-            self.say("Не все подписки обновились, показаны сохранённые серверы." if errors else "", err=bool(errors))
+            self.say(T("Не все подписки обновились, показаны сохранённые серверы.") if errors else "", err=bool(errors))
         if len(outs) > 1:
             self.tree.insert("", "end", iid="auto", text=AUTO_LABEL, image=self.flagimgs.get("AUTO") if self.v_flags.get() else "",
                              values=("", "", "AUTO"))
@@ -2889,7 +2892,7 @@ class App(tk.Tk):
             return self.sub_note.config(text="")
         t = time.localtime(min(times))
         today = time.strftime("%d.%m") == time.strftime("%d.%m", t)
-        self.sub_note.config(text=time.strftime("обновлено в %H:%M" if today else "обновлено %d.%m", t))
+        self.sub_note.config(text=time.strftime(T("обновлено в %H:%M") if today else T("обновлено %d.%m"), t))
 
     def refresh_due(self):
         """Re-fetch subscriptions whose provider interval (profile-update-interval) has passed."""
@@ -2935,22 +2938,22 @@ class App(tk.Tk):
         self.rules_busy = False
         if n == len(RULE_SETS):
             self.cfg["rules_ok"] = time.time()
-            self.say("Списки российских сайтов обновлены.")
+            self.say(T("Списки российских сайтов обновлены."))
         self.save(sources=False)
 
     # ----- speed test -----
     def run_test(self):
         if self.testing:
             self.test_stop.set()
-            return self.test_btn.config(text="Останавливаю…")
+            return self.test_btn.config(text=T("Останавливаю…"))
         if not self.outs:
-            return self.say("Сначала добавь подписку и нажми «Обновить».", err=True)
+            return self.say(T("Сначала добавь подписку и нажми «Обновить»."), err=True)
         plan = (self.v_flags.get(), self.v_ping.get(), self.v_speed.get())
         if not any(plan):
-            return self.say("В настройках выключено всё: флаги, пинг и скорость. Включи то, что нужно измерить.", err=True)
+            return self.say(T("В настройках выключено всё: флаги, пинг и скорость. Включи то, что нужно измерить."), err=True)
         self.testing = True
         self.test_stop.clear()
-        self.test_btn.config(text="Остановить")
+        self.test_btn.config(text=T("Остановить"))
         self.say("")
         threading.Thread(target=self._test_worker, args=(list(self.outs), plan), daemon=True).start()
 
@@ -3016,7 +3019,7 @@ class App(tk.Tk):
         elif alive is False and speed_on:
             self._cell(i, speed=-1)  # shown as a dash: nothing to measure on a server that does not answer
         self.set_exit(i, cc)
-        self.count.config(text=f"{'Пинг' if ping_on else 'Проверка'} {done}/{total}")
+        self.count.config(text=f"{T('Пинг') if ping_on else T('Проверка')} {done}/{total}")
 
     def _probe_all(self, outs, plan):
         """The measuring itself (the core is already running): servers in parallel, then the speed of the best ones."""
@@ -3046,7 +3049,7 @@ class App(tk.Tk):
         for k, i in enumerate(top, 1):
             if self.test_stop.is_set():
                 break
-            self._ui(lambda k=k, t=len(top): self.count.config(text=f"Скорость {k}/{t}"))
+            self._ui(lambda k=k, t=len(top): self.count.config(text=T("Скорость {0}/{1}").format(k, t)))
             sp, used = probe_speed(TEST_BASE_PORT + i, secs=pro["test_secs"], urls=urls)
             if used:
                 urls.remove(used)
@@ -3076,7 +3079,7 @@ class App(tk.Tk):
             if IS_LINUX and self.state == "off":
                 nic = None  # binding sockets to a device may need CAP_NET_RAW on old kernels; only do it when needed
             if not nic and self.state != "off":
-                raise RuntimeError("не нашёл подключение к интернету")
+                raise RuntimeError(T("не нашёл подключение к интернету"))
             outs = resolve_servers(outs)
             xports = {}
             if engines.has_xray(outs) and self.pro()["use_xray"]:
@@ -3094,7 +3097,7 @@ class App(tk.Tk):
                     write_json(TESTCFG, build_test_config(outs, nic, self.test_skip, xports))
                     ok, msg = core_check(TESTCFG)
             if not ok:
-                raise RuntimeError("не получилось подготовить проверку серверов")
+                raise RuntimeError(T("не получилось подготовить проверку серверов"))
             self.test_proc = subprocess.Popen([CORE, "run", "-c", TESTCFG], cwd=DATA, creationflags=NOWIN,
                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             own(self.test_proc)
@@ -3102,13 +3105,13 @@ class App(tk.Tk):
             deadline = time.time() + 10
             while True:
                 if self.test_proc.poll() is not None:
-                    raise RuntimeError("проверка не запустилась (возможно, мешает антивирус)")
+                    raise RuntimeError(T("проверка не запустилась (возможно, мешает антивирус)"))
                 try:
                     socket.create_connection(("127.0.0.1", last), 0.3).close()
                     break
                 except OSError:
                     if time.time() > deadline:
-                        raise RuntimeError("проверка не ответила (возможно, мешает антивирус)")
+                        raise RuntimeError(T("проверка не ответила (возможно, мешает антивирус)"))
                     time.sleep(0.2)
 
             self._probe_all(outs, plan)
@@ -3132,7 +3135,7 @@ class App(tk.Tk):
         self.test_btn.config(text=self.test_label())
         self.count.config(text=str(len(self.outs)))
         if err:
-            return self.say("Проверка не получилась: " + err + ". Проверь интернет и попробуй ещё раз.", err=True)
+            return self.say(T("Проверка не получилась: ") + err + T(". Проверь интернет и попробуй ещё раз."), err=True)
         show_flags, show_ping, show_speed = self.v_flags.get(), self.v_ping.get(), self.v_speed.get()
 
         def res(i):
@@ -3144,8 +3147,8 @@ class App(tk.Tk):
         passed = len(alive_all) - len(alive)
         if not alive:
             asked = any(self.alive.get(o["tag"]) is not None or res(i)[0] is not None for i, o in enumerate(self.outs))
-            return self.say("Ни один сервер не ответил. Проверь интернет или обнови подписку." if asked
-                            else "Проверка остановлена до первых результатов.", err=True)
+            return self.say(T("Ни один сервер не ответил. Проверь интернет или обнови подписку.") if asked
+                            else T("Проверка остановлена до первых результатов."), err=True)
         with_speed = [i for i in alive if show_speed and res(i)[1] is not None and res(i)[1] >= 0]
         with_ping = [i for i in alive if show_ping and res(i)[0] is not None and res(i)[0] >= 0]
 
@@ -3164,25 +3167,25 @@ class App(tk.Tk):
             what = fmt_speed(sp) + (f", {fmt_ping(p)}" if show_ping and p is not None and p >= 0 else "")
             skipped = sum(1 for i in alive if res(i)[1] is not None and res(i)[1] < 0)
             if skipped:
-                what += f"; у {skipped} серверов скорость не замерилась"
-            head = f"Самый быстрый: {flags.strip_flag(self.outs[best]['tag'])} ({what})."
-            src = f" Скорость измерена загрузкой с {self.speed_host}." if getattr(self, "speed_host", "") else ""
+                what += T("; у {0} серверов скорость не замерилась").format(skipped)
+            head = T("Самый быстрый: {0} ({1}).").format(flags.strip_flag(self.outs[best]['tag']), what)
+            src = T(" Скорость измерена загрузкой с {0}.").format(self.speed_host) if getattr(self, "speed_host", "") else ""
         elif with_ping:
             best = min(with_ping, key=lambda i: res(i)[0])
-            head = f"Самый быстрый по отклику: {flags.strip_flag(self.outs[best]['tag'])} ({fmt_ping(res(best)[0])})."
+            head = T("Самый быстрый по отклику: {0} ({1}).").format(flags.strip_flag(self.outs[best]['tag']), fmt_ping(res(best)[0]))
         else:
             best = None
-            head = f"Ответили {len(alive_all)} из {len(self.outs)} серверов."
+            head = T("Ответили {0} из {1} серверов.").format(len(alive_all), len(self.outs))
         if show_flags:
             wrong = sum(1 for o in self.outs
                         if self.exit_cc.get(okey(o)) and flags.code_for(o["tag"]) not in ("??", self.exit_cc[okey(o)]))
             if wrong:
-                note = f" У {wrong} серверов страна в названии не совпала с реальным выходом: флаг показан по выходу."
+                note = T(" У {0} серверов страна в названии не совпала с реальным выходом: флаг показан по выходу.").format(wrong)
         if best is not None and self.tree.selection() and self.tree.selection()[0] == "auto":
-            hint = ("«Быстрейший из списка» сам выберет лучший по отклику и будет переключаться. "
-                    "Чтобы подключаться только к одному серверу, выбери его в списке.")
+            hint = (T("«Быстрейший из списка» сам выберет лучший по отклику и будет переключаться. "
+                    "Чтобы подключаться только к одному серверу, выбери его в списке."))
         if passed:
-            hint += " Серые серверы (выход в России) «Быстрейший из списка» не берёт: через них блокировки не обойти."
+            hint += T(" Серые серверы (выход в России) «Быстрейший из списка» не берёт: через них блокировки не обойти.")
         self.say(f"{head}{src}{note} {hint}".strip())
 
     def is_pinned(self, i):
@@ -3211,8 +3214,8 @@ class App(tk.Tk):
         i = int(iid)
         o = self.outs[i]
         m = tk.Menu(self, tearoff=0, bg=PAPER, fg=INK, activebackground=INK, activeforeground=PAPER, bd=0, font=self.f_s)
-        m.add_command(label="Открепить" if self.is_pinned(i) else "Закрепить сверху", command=lambda: self.toggle_pin(i))
-        m.add_command(label="Скопировать название", command=lambda: (self.clipboard_clear(), self.clipboard_append(flags.strip_flag(o["tag"]))))
+        m.add_command(label=T("Открепить") if self.is_pinned(i) else T("Закрепить сверху"), command=lambda: self.toggle_pin(i))
+        m.add_command(label=T("Скопировать название"), command=lambda: (self.clipboard_clear(), self.clipboard_append(flags.strip_flag(o["tag"]))))
         m.tk_popup(e.x_root, e.y_root)
 
     def on_login_toggle(self, *a):
@@ -3222,12 +3225,12 @@ class App(tk.Tk):
         if autostart_set(want):
             self.cfg["autostart"] = want
             self.save(sources=False)
-            self.say("Программа будет запускаться при входе в систему." if want else "Автозапуск выключен.")
+            self.say(T("Программа будет запускаться при входе в систему.") if want else T("Автозапуск выключен."))
         else:
             self._login_busy = True  # put the tick back without running this handler again
             self.v_login.set(not want)
             self._login_busy = False
-            self.say("Не получилось изменить автозапуск. Нужны права администратора и собранная программа.", err=True)
+            self.say(T("Не получилось изменить автозапуск. Нужны права администратора и собранная программа."), err=True)
 
     def autostart_run(self):
         """Started at login (--autostart): out of the way in the tray, and connected if the settings say so."""
@@ -3253,32 +3256,32 @@ class App(tk.Tk):
         if self.proc and self.proc.poll() is None:
             return self.stop()
         if not is_admin():
-            self.say("Нужны права администратора. Закрой программу и открой её снова от имени администратора.", err=True)
-            return show_error(self, "Для работы VPN нужны права администратора.\n\nЗакрой программу и открой её снова: нажми "
-                                    "на значок правой кнопкой и выбери «Запуск от имени администратора».")
+            self.say(T("Нужны права администратора. Закрой программу и открой её снова от имени администратора."), err=True)
+            return show_error(self, T("Для работы VPN нужны права администратора.\n\nЗакрой программу и открой её снова: нажми "
+                                    "на значок правой кнопкой и выбери «Запуск от имени администратора»."))
         if not self.outs:
-            return self.say("Сначала добавь подписку и нажми «Обновить».", err=True)
+            return self.say(T("Сначала добавь подписку и нажми «Обновить»."), err=True)
         if self.testing:
-            return self.say("Идёт тест скорости. Дождись конца или остановь его.", err=True)
+            return self.say(T("Идёт тест скорости. Дождись конца или остановь его."), err=True)
         self.clean_done.wait(8)  # leftover cores from a previous run are being closed
         self.save()
-        if karing_running() and not ask_yes_no(self, "Запущен другой VPN-клиент (Karing / v2rayN / Hiddify / NekoRay).\n"
-                     "Два VPN сразу конфликтуют. Отключи его и нажми «Да», либо «Нет» для отмены."):
+        if karing_running() and not ask_yes_no(self, T("Запущен другой VPN-клиент (Karing / v2rayN / Hiddify / NekoRay).\n"
+                     "Два VPN сразу конфликтуют. Отключи его и нажми «Да», либо «Нет» для отмены.")):
             return
         proxy_note = ""
         addr, alive = local_proxy_state()
         if addr and not alive:
-            if ask_yes_no(self, MSG_DEAD_PROXY.format(addr=addr), "Отключить прокси", "Оставить"):
-                proxy_note = "Прокси Windows отключён: он не отвечал." if disable_system_proxy() else ""
+            if ask_yes_no(self, MSG_DEAD_PROXY.format(addr=addr), T("Отключить прокси"), T("Оставить")):
+                proxy_note = T("Прокси Windows отключён: он не отвечал.") if disable_system_proxy() else ""
                 if not proxy_note:
-                    self.say("Не получилось отключить прокси. Отключи его в настройках Windows: «Сеть и Интернет» → «Прокси».", err=True)
+                    self.say(T("Не получилось отключить прокси. Отключи его в настройках Windows: «Сеть и Интернет» → «Прокси»."), err=True)
             else:
-                proxy_note = f"Прокси Windows {addr} не отвечает, сайты в браузере могут не открываться."
+                proxy_note = T("Прокси Windows {0} не отвечает, сайты в браузере могут не открываться.").format(addr)
         elif addr:
-            proxy_note = f"В Windows включён прокси {addr} (другая программа): браузер идёт через него, а не через этот VPN."
+            proxy_note = T("В Windows включён прокси {0} (другая программа): браузер идёт через него, а не через этот VPN.").format(addr)
         if not os.path.isfile(CORE):
-            self.say("Не хватает файла для работы VPN. Скорее всего, его удалил антивирус.", err=True)
-            if Dialog(self, MSG_NO_CORE, ["Скачать заново", "Закрыть"], "error", 0, 1).result == 0:
+            self.say(T("Не хватает файла для работы VPN. Скорее всего, его удалил антивирус."), err=True)
+            if Dialog(self, MSG_NO_CORE, [T("Скачать заново"), T("Закрыть")], "error", 0, 1).result == 0:
                 open_url(RELEASES_URL)
             return
         self.api = (free_port(), secrets.token_hex(16))  # new secret per connection, loopback only
@@ -3288,22 +3291,20 @@ class App(tk.Tk):
         ok, msg, note = self.prepare_config()
         if not ok:
             self.toggle_log(True)
-            self.say("Не получилось подготовить подключение. Обнови подписку или выбери другой сервер.", err=True)
-            return show_error(self, "Не получилось подготовить подключение.\n\nЧто сделать:\n• нажми «Обновить» в разделе «Подписки» "
+            self.say(T("Не получилось подготовить подключение. Обнови подписку или выбери другой сервер."), err=True)
+            return show_error(self, T("Не получилось подготовить подключение.\n\nЧто сделать:\n• нажми «Обновить» в разделе «Подписки» "
                                     "и подключись снова;\n• или выбери в списке другой сервер.\n\nЕсли не помогает, открой «Лог» внизу "
-                                    "окна и пришли его текст в поддержку.\n\nТехническая причина: " + msg[-300:])
+                                    "окна и пришли его текст в поддержку.\n\nТехническая причина: ") + msg[-300:])
         try:
             self.proc = start_core(RUNCFG)
         except OSError as e:  # blocked by an antivirus, no rights, file locked
             self.stop_xray()
-            self.say("VPN не запустился. Проверь антивирус и права.", err=True)
-            return show_error(self, "VPN не смог запуститься.\n\nОбычно виноват антивирус или нехватка прав. Что сделать: добавь "
-                                    "программу в исключения антивируса, закрой её и открой снова от имени администратора.\n\n"
-                                    f"Техническая причина: {e}")
+            self.say(T("VPN не запустился. Проверь антивирус и права."), err=True)
+            return show_error(self, T("VPN не смог запуститься.\n\nОбычно виноват антивирус или нехватка прав. Что сделать: добавь программу в исключения антивируса, закрой её и открой снова от имени администратора.\n\nТехническая причина: {0}").format(e))
         self.active = self.sel_name()
         self.state = "connecting"
         self.t_conn = time.time()
-        self.say(" ".join(t for t in (note, proxy_note, "" if IS_WIN else "Подтверди права администратора в окне системы.") if t))
+        self.say(" ".join(t for t in (note, proxy_note, "" if IS_WIN else T("Подтверди права администратора в окне системы.")) if t))
         self.refresh_power()
 
     def prepare_config(self):
@@ -3313,7 +3314,7 @@ class App(tk.Tk):
         outs, chosen, pool, extra = self.outs, self.chosen(), self.auto_pool(), clean_domains(self.extra.get())
         pro = self.pro()
         mixed = pick_port(pro["mixed_port"])
-        notes = [] if mixed == pro["mixed_port"] else [f"Порт {pro['mixed_port']} занят, локальный прокси на порту {mixed}."]
+        notes = [] if mixed == pro["mixed_port"] else [T("Порт {0} занят, локальный прокси на порту {1}.").format(pro['mixed_port'], mixed)]
         self.stop_xray()
         xports = {}
         if engines.has_xray(outs):
@@ -3325,14 +3326,14 @@ class App(tk.Tk):
                 if problem:
                     notes.append(problem)
             else:
-                notes.append("Серверы XHTTP и похожие пропущены: Xray выключен в расширенных настройках.")
+                notes.append(T("Серверы XHTTP и похожие пропущены: Xray выключен в расширенных настройках."))
             outs = [o for o in outs if not engines.is_xray(o) or o["tag"] in xports]
             names = {o["tag"] for o in outs}
             pool = [t for t in pool if t in names] or list(names)
             if chosen != "AUTO" and chosen not in names:
                 chosen = "AUTO"
             if not outs:
-                return False, "нет серверов, которые можно запустить", " ".join(notes)
+                return False, T("нет серверов, которые можно запустить"), " ".join(notes)
 
         def write():
             write_json(RUNCFG, build_config(outs, chosen, self.ru.get(), extra, self.api, pool, mixed, pro, xports))
@@ -3346,9 +3347,9 @@ class App(tk.Tk):
                     continue
                 drop_downloaded_rules()
                 self.cfg["rules_ok"] = 0  # fetch a fresh copy at the next chance
-                notes.append("Список российских сайтов был повреждён, взял встроенный.")
+                notes.append(T("Список российских сайтов был повреждён, взял встроенный."))
             elif step == "servers":
-                self.say("Проверяю серверы по одному…")
+                self.say(T("Проверяю серверы по одному…"))
                 self.update_idletasks()
                 good, bad = salvage_outs(outs)
                 if not (good and bad):
@@ -3357,13 +3358,13 @@ class App(tk.Tk):
                 outs = good
                 chosen = chosen if chosen in names else "AUTO"
                 pool = [t for t in pool if t in names] or [o["tag"] for o in good]
-                notes.append(f"Пропущено серверов с неверными данными: {len(bad)}.")
+                notes.append(T("Пропущено серверов с неверными данными: {0}.").format(len(bad)))
             else:  # the user's advanced settings: last suspect, but a connection beats a setting
                 if pro == PRO_DEFAULTS:
                     continue
                 pro = dict(PRO_DEFAULTS)
                 mixed = pick_port(pro["mixed_port"])
-                notes.append("Расширенные настройки не подошли, использованы обычные.")
+                notes.append(T("Расширенные настройки не подошли, использованы обычные."))
             write()
             ok, msg = core_check(RUNCFG)
         self.mixed_active = mixed
@@ -3423,9 +3424,9 @@ class App(tk.Tk):
 
     def restart(self):
         """Start this program again (the look is read at start). The VPN is off for the moment."""
-        if self.state != "off" and not ask_yes_no(self, "Чтобы применить оформление, программа перезапустится. VPN на это "
-                                                  "время выключится, потом его можно включить снова.\n\nПерезапустить?",
-                                                  "Перезапустить", "Не сейчас"):
+        if self.state != "off" and not ask_yes_no(self, T("Чтобы применить оформление, программа перезапустится. VPN на это "
+                                                  "время выключится, потом его можно включить снова.\n\nПерезапустить?"),
+                                                  T("Перезапустить"), T("Не сейчас")):
             return
         cmd = [sys.executable] if self.frozen() else [sys.executable, os.path.abspath(__file__)]
         env = dict(updater.fresh_env(), FIMA_WAIT_PID=str(os.getpid()))
@@ -3434,7 +3435,7 @@ class App(tk.Tk):
             subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              close_fds=True, **extra)
         except OSError:
-            return self.say("Не получилось перезапустить. Закрой программу и открой её снова.", err=True)
+            return self.say(T("Не получилось перезапустить. Закрой программу и открой её снова."), err=True)
         self.quit_app()
 
     def may_restart(self):
@@ -3450,7 +3451,7 @@ class App(tk.Tk):
         if self.state != "off" or self.quitting or self.installing:
             return
         if karing_running():
-            return self.say("Соединение прервалось. Сейчас работает другой VPN-клиент: выключи его и нажми «Подключить».", err=True)
+            return self.say(T("Соединение прервалось. Сейчас работает другой VPN-клиент: выключи его и нажми «Подключить»."), err=True)
         self.toggle()
 
     def fail(self):
@@ -3463,14 +3464,14 @@ class App(tk.Tk):
             pass
         self.stop()
         if not IS_WIN and (rc in (126, 127) or "cancel" in err.lower()):
-            return self.say("Не получилось подтвердить права администратора: окно с паролем закрыто. "
-                            "Нажми «Подключить» и введи пароль.", err=True)
+            return self.say(T("Не получилось подтвердить права администратора: окно с паролем закрыто. "
+                            "Нажми «Подключить» и введи пароль."), err=True)
         if IS_WIN and was_on and self.pro()["auto_reconnect"] and self.may_restart():  # on Linux/macOS a new connection needs the password again
-            self.say("Соединение прервалось, подключаюсь заново…", err=True)
+            self.say(T("Соединение прервалось, подключаюсь заново…"), err=True)
             self.after(1500, self.reconnect)
             return
-        self.say("Соединение прервалось. Нажми «Подключить» ещё раз. Если так повторяется, выбери другой сервер "
-                 "или обнови подписку.", err=True)
+        self.say(T("Соединение прервалось. Нажми «Подключить» ещё раз. Если так повторяется, выбери другой сервер "
+                 "или обнови подписку."), err=True)
         self.toggle_log(True)
 
     def stop(self):
@@ -3561,7 +3562,7 @@ class App(tk.Tk):
         self.xray_restarts = [t for t in getattr(self, "xray_restarts", []) if now - t < 600]
         if len(self.xray_restarts) >= 3:
             self.xray_proc = None
-            return self.say("Xray остановился несколько раз подряд: серверы XHTTP и похожие сейчас не работают. Подключись заново.", err=True)
+            return self.say(T("Xray остановился несколько раз подряд: серверы XHTTP и похожие сейчас не работают. Подключись заново."), err=True)
         self.xray_restarts.append(now)
         try:
             self.xray_proc = subprocess.Popen([XRAY, "run", "-format", "json", "-c", XRAYCFG], cwd=DATA, creationflags=NOWIN,
@@ -3587,8 +3588,8 @@ class App(tk.Tk):
     def tray_title(self):
         if self.state == "on":
             name = flags.strip_flag(self.current) if self.current else ""
-            return ("VPN: подключено" + (f", {name}" if name else ""))[:100]
-        return "VPN: подключаю…" if self.state == "connecting" else "VPN: выключено"
+            return (T("VPN: подключено") + (f", {name}" if name else ""))[:100]
+        return T("VPN: подключаю…") if self.state == "connecting" else T("VPN: выключено")
 
     def show_window(self):
         """Bring the window back from the tray (or from behind other windows)."""
@@ -3609,7 +3610,7 @@ class App(tk.Tk):
         self.remember_window()
         self.withdraw()
         if not self.cfg.get("tray_hint_shown") and self.tray:
-            self.tray.notify("Программа работает в трее. Чтобы выйти совсем, выбери «Выход» в меню значка.")
+            self.tray.notify(T("Программа работает в трее. Чтобы выйти совсем, выбери «Выход» в меню значка."))
             self.cfg["tray_hint_shown"] = True
             self.save(sources=False)
 
@@ -3886,7 +3887,7 @@ if __name__ == "__main__":
         if not signal_running_instance():  # it did not answer: say so, in the app's style
             _r = tk.Tk()
             _r.withdraw()
-            Dialog(_r, "Приложение уже запущено, но не отвечает.\n\nЗакрой его в диспетчере задач и запусти снова.",
+            Dialog(_r, T("Приложение уже запущено, но не отвечает.\n\nЗакрой его в диспетчере задач и запусти снова."),
                    ["OK"], "error", 0, 0)
         sys.exit(0)
     if "--selftest" in sys.argv:

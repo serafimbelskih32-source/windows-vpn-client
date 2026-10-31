@@ -15,6 +15,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # test names are Rus
 WIP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, WIP)
 os.environ["FIMA_NO_TRAY"] = "1"  # no real tray icons from tests
+os.environ.setdefault("FIMA_LANG", "ru")  # the checks below read Russian texts; the language of the machine must not change them
 import vpn  # noqa: E402
 
 TMP = tempfile.mkdtemp(prefix="fimatest_")
