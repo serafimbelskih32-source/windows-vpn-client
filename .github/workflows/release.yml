@@ -67,7 +67,7 @@ jobs:
           ls -la core
 
       - name: Python packages and icons
-        run: pip install pillow pystray certifi && python make_icon.py
+        run: pip install pillow pystray certifi pyyaml && python make_icon.py
 
       - name: Tests
         shell: bash
@@ -76,9 +76,10 @@ jobs:
           python tests/test_flags.py
           python tests/test_tray.py
           python tests/test_supervisor.py
+          python tests/test_sources.py
           python tests/test_robust.py
           # the window-level suite hangs inside Tk's update() on the macOS runner (not understood yet): Windows and Linux only
-          if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python tests/test_app.py; elif [ "$RUNNER_OS" = "Windows" ]; then python tests/test_app.py; fi
+          if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python tests/test_app.py; xvfb-run -a python tests/test_design.py; elif [ "$RUNNER_OS" = "Windows" ]; then python tests/test_app.py; python tests/test_design.py; fi
           python vpn.py --selftest < tests/sample_links.txt
           if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python tests/gui_smoke.py; else python tests/gui_smoke.py; fi
 
@@ -88,13 +89,10 @@ jobs:
         shell: bash
         run: |
           mkdir -p shots
-          for s in 1.0 1.5; do
-            if [ "$RUNNER_OS" = "Linux" ]; then
-              xvfb-run -a -s "-screen 0 1700x1100x24" python tests/shots.py "shots/x$s" $s || true
-            else
-              python tests/shots.py "shots/x$s" $s || true
-            fi
-          done
+          run() { if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a -s "-screen 0 1700x1100x24" python tests/shots.py "$@" || true; else python tests/shots.py "$@" || true; fi; }
+          run shots/light-1.0 1.0
+          run shots/light-1.5 1.5
+          run shots/dark-1.0 1.0 theme=dark accent=green
 
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'workflow_dispatch'

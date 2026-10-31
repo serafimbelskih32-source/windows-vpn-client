@@ -381,7 +381,7 @@ try:
     check("a refusal (403) for one User-Agent: the next one is tried", len(outs) > 0 and len(calls) == 2 and calls[0][0] != calls[1][0], calls)
 
     # an answer that is not a subscription
-    vpn.updater.urlopen = fake_urlopen(["<html>login</html>"] * 2)
+    vpn.updater.urlopen = fake_urlopen(["<html>login</html>"] * len(vpn.UAS))
     outs, info, ua, errs = vpn.fetch_source(SECRET)
     check("an answer without servers says so", not outs and len(errs) == 1 and "нет серверов" in errs[0], errs)
 

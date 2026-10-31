@@ -21,7 +21,7 @@ if [ ! -x core/sing-box ]; then
   chmod +x core/sing-box
   rm -rf "$TMP"
 fi
-python3 -m pip install pyinstaller pillow pystray certifi
+python3 -m pip install pyinstaller pillow pystray certifi pyyaml
 python3 make_icon.py
 if [ "$(uname -s)" = "Darwin" ]; then
   python3 -m PyInstaller --noconfirm --windowed --name FimaVPN --icon icon.icns --collect-submodules pystray --collect-data certifi \

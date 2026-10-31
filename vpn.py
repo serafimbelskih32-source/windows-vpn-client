@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import tkinter as tk
 from tkinter import font as tkfont
@@ -220,218 +221,12 @@ def update_rule_sets(port):
     return done
 
 
-# ---------- link parsing ----------
-def b64d(s: str) -> str:
-    s = s.strip().replace("-", "+").replace("_", "/")
-    s += "=" * (-len(s) % 4)
-    return base64.b64decode(s).decode("utf-8", "replace")
+# ---------- link parsing: see sources.py ----------
+from sources import (b64d, clean_outbound, parse_inline, parse_link, parse_text, parse_text_ex, skipped_note,  # noqa: E402,F401
+                     source_lines, split_sources, valid_outbound, Unsupported)
 
 
-def _tls(q, host, default_sec="none"):
-    sec = q.get("security", [default_sec])[0]
-    if sec not in ("tls", "reality"):
-        return None
-    t = {"enabled": True, "server_name": q.get("sni", q.get("peer", [host]))[0] or host}
-    if q.get("allowInsecure", ["0"])[0] in ("1", "true") or q.get("insecure", ["0"])[0] in ("1", "true"):
-        t["insecure"] = True
-    if q.get("alpn", [""])[0]:
-        t["alpn"] = q["alpn"][0].split(",")
-    fp = q.get("fp", [""])[0]
-    if fp or sec == "reality":
-        t["utls"] = {"enabled": True, "fingerprint": fp or "chrome"}
-    if sec == "reality":
-        t["reality"] = {"enabled": True, "public_key": q.get("pbk", [""])[0], "short_id": q.get("sid", [""])[0]}
-    return t
-
-
-def _transport(q):
-    typ = q.get("type", ["tcp"])[0]
-    if typ == "ws":
-        t = {"type": "ws", "path": unquote(q.get("path", ["/"])[0])}
-        if q.get("host", [""])[0]:
-            t["headers"] = {"Host": q["host"][0]}
-        return t
-    if typ == "grpc":
-        return {"type": "grpc", "service_name": unquote(q.get("serviceName", [""])[0])}
-    if typ in ("http", "h2"):
-        return {"type": "http", "path": unquote(q.get("path", ["/"])[0]),
-                "host": [q["host"][0]] if q.get("host", [""])[0] else []}
-    if typ == "httpupgrade":
-        return {"type": "httpupgrade", "path": unquote(q.get("path", ["/"])[0]), "host": q.get("host", [""])[0]}
-    return None
-
-
-def parse_link(link: str):
-    link = link.strip()
-    if "://" not in link:
-        return None
-    scheme = link.split("://", 1)[0].lower()
-    name = unquote(link.split("#", 1)[1]) if "#" in link else ""
-    try:
-        if scheme == "vmess":
-            j = json.loads(b64d(link[8:].split("#")[0]))
-            o = {"type": "vmess", "tag": j.get("ps") or name, "server": j["add"], "server_port": int(j["port"]),
-                 "uuid": j["id"], "security": j.get("scy", "auto"), "alter_id": int(j.get("aid", 0) or 0)}
-            q = {"security": ["tls" if j.get("tls") == "tls" else "none"], "sni": [j.get("sni") or j.get("host") or j["add"]],
-                 "type": [j.get("net", "tcp")], "path": [j.get("path", "/")], "host": [j.get("host", "")],
-                 "serviceName": [j.get("path", "")], "fp": [j.get("fp", "")], "alpn": [j.get("alpn", "")]}
-            t = _tls(q, j["add"])
-            if t:
-                o["tls"] = t
-            tr = _transport(q)
-            if tr:
-                o["transport"] = tr
-            return o
-        if scheme == "ss":
-            body = link[5:].split("#")[0]
-            plugin = None
-            if "?" in body:
-                body, qs = body.split("?", 1)
-                plugin = parse_qs(qs).get("plugin", [None])[0]
-            if "@" not in body:
-                body = b64d(body)
-            userinfo, hostport = body.rsplit("@", 1)
-            if ":" not in userinfo:
-                userinfo = b64d(userinfo)
-            method, pw = userinfo.split(":", 1)
-            host, port = hostport.rsplit(":", 1)
-            o = {"type": "shadowsocks", "tag": name, "server": host.strip("[]"), "server_port": int(port),
-                 "method": unquote(method), "password": unquote(pw)}
-            if plugin:
-                p = unquote(plugin).split(";")
-                o["plugin"] = p[0]
-                o["plugin_opts"] = ";".join(p[1:])
-            return o
-        u = urlparse(link)
-        q = parse_qs(u.query)
-        host, port = u.hostname, (u.port if u.port is not None else 443)  # an explicit :0 is wrong, not "443"
-        if scheme == "vless":
-            o = {"type": "vless", "tag": name, "server": host, "server_port": port, "uuid": unquote(u.username or ""),
-                 "packet_encoding": "xudp"}
-            if q.get("flow", [""])[0]:
-                o["flow"] = q["flow"][0]
-            t = _tls(q, host)
-            if t:
-                o["tls"] = t
-            tr = _transport(q)
-            if tr:
-                o["transport"] = tr
-            return o
-        if scheme == "trojan":
-            o = {"type": "trojan", "tag": name, "server": host, "server_port": port, "password": unquote(u.username or "")}
-            o["tls"] = _tls(q, host, "tls") or {"enabled": True, "server_name": host}
-            tr = _transport(q)
-            if tr:
-                o["transport"] = tr
-            return o
-        if scheme in ("hysteria2", "hy2"):
-            o = {"type": "hysteria2", "tag": name, "server": host, "server_port": port,
-                 "password": unquote(u.username or ""),
-                 "tls": {"enabled": True, "server_name": q.get("sni", [host])[0],
-                         "insecure": q.get("insecure", ["0"])[0] in ("1", "true")}}
-            if q.get("obfs", [""])[0]:
-                o["obfs"] = {"type": q["obfs"][0], "password": q.get("obfs-password", [""])[0]}
-            return o
-        if scheme == "tuic":
-            o = {"type": "tuic", "tag": name, "server": host, "server_port": port, "uuid": unquote(u.username or ""),
-                 "password": unquote(u.password or ""), "congestion_control": q.get("congestion_control", ["bbr"])[0],
-                 "tls": {"enabled": True, "server_name": q.get("sni", [host])[0],
-                         "insecure": q.get("allow_insecure", ["0"])[0] in ("1", "true"),
-                         "alpn": q.get("alpn", ["h3"])[0].split(",")}}
-            return o
-    except Exception:
-        return None
-    return None
-
-
-_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-_NEEDS = {"vless": ("uuid",), "vmess": ("uuid",), "tuic": ("uuid",), "trojan": ("password",),
-          "shadowsocks": ("method", "password"), "hysteria2": ("password",)}
-_NOT_SERVERS = ("direct", "block", "dns", "selector", "urltest")
-
-
-def valid_outbound(o):
-    """Can this entry be a server at all? One broken line of a subscription (no host, port 0, a UUID that is not
-    one) used to make the whole config fail its check, so nobody could connect. Anything dubious is dropped here;
-    what only the core can judge is dealt with by salvage_outs."""
-    try:
-        if not isinstance(o, dict) or not isinstance(o.get("type"), str) or o["type"] in _NOT_SERVERS or not o["type"]:
-            return False
-        srv, port = o.get("server"), o.get("server_port")
-        if not isinstance(srv, str) or not srv.strip() or len(srv) > 253 or re.search(r"[\s/@#?\\]", srv):
-            return False
-        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
-            return False
-        for k in _NEEDS.get(o["type"], ()):
-            if not isinstance(o.get(k), str) or not o[k].strip():
-                return False
-        if "uuid" in _NEEDS.get(o["type"], ()) and not _UUID.match(o["uuid"]):
-            return False
-        for k in ("tls", "transport"):
-            if k in o and not isinstance(o[k], dict):
-                return False
-        tls = o.get("tls") or {}
-        if "alpn" in tls and (not isinstance(tls["alpn"], list) or not all(isinstance(a, str) and a for a in tls["alpn"])):
-            return False
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def clean_outbound(o):
-    """What a core must never take from a subscription: links to other outbounds (a server that is 'behind' a tag that
-    is not in our list makes the config invalid) and anything that is not plain data."""
-    o = dict(o)
-    for k in ("detour", "outbounds", "default", "interrupt_exist_connections", "domain_resolver"):
-        o.pop(k, None)
-    if not isinstance(o.get("tag"), str):
-        o["tag"] = ""
-    return o
-
-
-def parse_text(text: str):
-    """Return list of sing-box outbounds from a blob: links, base64 of links, or a sing-box json.
-    Only entries that pass valid_outbound come back; a bad line costs that one server, never the list."""
-    text = text.strip()
-    if text.startswith("{"):
-        try:
-            j = json.loads(text)
-            raw = [clean_outbound(o) for o in j.get("outbounds", []) if isinstance(o, dict)]
-            outs = [o for o in raw if valid_outbound(o)]
-        except Exception:
-            return []
-        return _unique_tags(outs)
-    if "://" not in text:  # base64 never contains "://"; a plain list may start with a comment or a broken line
-        try:
-            text = b64d("".join(text.split()))
-        except Exception:
-            pass
-    outs = []
-    for line in re.split(r"[\r\n]+", text):
-        o = parse_link(line)
-        if o and valid_outbound(o):
-            outs.append(o)
-    return _unique_tags(outs)
-
-
-def _unique_tags(outs):
-    """Every server gets a non-empty tag of its own that does not collide with the config's reserved ones."""
-    seen = {}
-    for o in outs:
-        t = o.get("tag") or f"{o['type']}-{o.get('server', '?')}:{o.get('server_port', '')}"
-        t = t.strip()[:120] or f"{o['type']}-{o.get('server', '?')}"
-        if t in ("proxy", "direct", "AUTO"):
-            t += " (node)"
-        if t in seen:
-            seen[t] += 1
-            t = f"{t} ({seen[t]})"
-        else:
-            seen[t] = 1
-        o["tag"] = t
-    return outs
-
-
-UAS = ("v2rayN/7.0", "sing-box/1.13")
+UAS = ("v2rayN/7.0", "sing-box/1.13", "clash-verge/v2.2.3", "Hiddify/2.5.7")
 MAX_SUB_BYTES = 8 * 1024 * 1024  # a real subscription is tens of kilobytes
 REFRESH_DEFAULT_H = 12  # when the provider does not send profile-update-interval
 
@@ -451,7 +246,10 @@ def fetch(url: str, ua: str, via=None):
         body = raw
     if len(body) > MAX_SUB_BYTES:
         raise ValueError("ответ слишком большой для подписки")
-    return body.decode("utf-8", "replace"), headers
+    if body[:2] == b"\x1f\x8b":  # some panels compress even when not asked to
+        import gzip
+        body = gzip.decompress(body)
+    return body.decode("utf-8-sig", "replace"), headers
 
 
 def split_sources(src: str):
@@ -507,9 +305,17 @@ def fetch_source(url, prefer=None, via=None):
                 if not updater.is_http_error(e):
                     break  # no connection at all: the other User-Agent would wait for the same timeout again
                 continue  # the site answered "no": another User-Agent may please it
-            outs = parse_text(body)
+            outs, skipped = parse_text_ex(body)
             if outs:
-                return outs, sub_info(headers), ua, []
+                info = sub_info(headers)
+                if skipped:
+                    info["skipped"] = dict(skipped)
+                return outs, info, ua, []
+            if skipped:  # servers were there, none of them runnable
+                msg = f"{host}: {skipped_note(skipped)}"
+                if msg not in errors:
+                    errors.append(msg)
+                continue
             msg = f"{host}: в ответе нет серверов (ссылка устарела или это не подписка)"
             if msg not in errors:
                 errors.append(msg)
@@ -546,6 +352,21 @@ MSG_NO_CORE = ("Не хватает файла, без которого VPN не
 # Everything an ordinary user never needs. The defaults are what the program always did; the window for these settings
 # opens with a double click on «Настройки». Each entry: default, kind, bounds / choices, label for the window.
 PRO_FIELDS = {
+    # look (the first group applies at the next start, the rest at once)
+    "theme": ("light", "choice", ("auto", "light", "dark", "contrast")),
+    "accent": ("blue", "choice", ("blue", "green", "orange", "violet", "pink")),  # keys of ACCENTS
+    "accent_hex": ("", "color", None),
+    "ui_scale": (100, "int", (70, 180)),
+    "density": ("normal", "choice", ("compact", "normal", "roomy")),
+    "ui_font": ("auto", "choice", ("auto", "condensed", "regular", "mono")),
+    "border": (2, "int", (1, 4)),
+    "win_width": (480, "int", (380, 900)),
+    "shadow": (True, "bool", None),
+    "anim": (True, "bool", None),
+    "remember_window": (True, "bool", None),
+    "on_top": (False, "bool", None),
+    "alpha": (100, "int", (60, 100)),
+    # connection
     "mixed_port": (2080, "int", (1024, 65535)),
     "tun_stack": ("mixed", "choice", ("mixed", "system", "gvisor")),
     "strict_route": (True, "bool", None),
@@ -561,6 +382,22 @@ PRO_FIELDS = {
     "log_level": ("info", "choice", ("debug", "info", "warn", "error")),
 }
 PRO_DEFAULTS = {k: v[0] for k, v in PRO_FIELDS.items()}
+RESTART_KEYS = ("theme", "accent", "accent_hex", "ui_scale", "density", "ui_font", "border")  # read when the window is built
+PRO_LABELS = {  # what the segmented choices say (the stored value is the key)
+    "theme": {"auto": "Как в системе", "light": "Светлая", "dark": "Тёмная", "contrast": "Контрастная"},
+    "accent": {"blue": "Синий", "green": "Зелёный", "orange": "Оранжевый", "violet": "Фиолетовый", "pink": "Розовый"},
+    "density": {"compact": "Плотный", "normal": "Обычный", "roomy": "Свободный"},
+    "ui_font": {"auto": "Как задумано", "condensed": "Узкий", "regular": "Обычный", "mono": "Моноширинный"},
+}
+FONT_CHOICES = {
+    "auto": UI_FONTS,
+    "condensed": (("Bahnschrift SemiCondensed", "Bahnschrift Condensed", "Arial Narrow") if IS_WIN else
+                  ("Avenir Next Condensed", "Helvetica Neue") if IS_MAC else
+                  ("DejaVu Sans Condensed", "Noto Sans Condensed", "Liberation Sans Narrow")),
+    "regular": (("Segoe UI", "Arial") if IS_WIN else ("Helvetica Neue", "Arial") if IS_MAC else
+                ("Noto Sans", "DejaVu Sans", "Liberation Sans")),
+    "mono": (MONO,),
+}
 _HOST = re.compile(r"^(\d{1,3}(\.\d{1,3}){3}|[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+)$")
 
 
@@ -587,6 +424,11 @@ def clean_pro(raw):
             elif kind == "choice":
                 if v not in rule:
                     raise ValueError("такого варианта нет")
+            elif kind == "color":
+                v = str(v).strip()
+                if v and not re.fullmatch(r"#?[0-9A-Fa-f]{6}", v):
+                    raise ValueError("нужен цвет вида #1E3CFF или пусто")
+                v = ("#" + v.lstrip("#")).upper() if v else ""
             elif kind == "host":
                 v = str(v).strip()
                 if not _HOST.match(v) or any(int(p) > 255 for p in v.split(".") if v.replace(".", "").isdigit()):
@@ -599,6 +441,20 @@ def clean_pro(raw):
         except ValueError as e:
             errors[k] = str(e)
     return out, errors
+
+
+DESIGN_SAFE = False  # set when the window could not be built with the saved design: the defaults are used then
+
+
+def load_design():
+    """The design settings in force, read from the settings file before any window exists. Never raises."""
+    if DESIGN_SAFE:
+        return dict(PRO_DEFAULTS)
+    try:
+        with open(SETTINGS, encoding="utf-8-sig") as f:
+            return clean_pro(json.load(f).get("pro"))[0]
+    except Exception:  # noqa: BLE001
+        return dict(PRO_DEFAULTS)
 
 
 def strip_ansi(text):
@@ -688,19 +544,86 @@ def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None
     return cfg
 
 
-# ---------- GUI ----------
+# ---------- GUI: palettes, accents and the settings that shape the look ----------
+# Roles: INK = text, outlines, the hard shadow and the selected row; PAPER = fields and quiet buttons; BG = the ground;
+# BLUE = the accent (a live connection, the main action, ticks) with ONACCENT for what is written on it.
+THEMES = {
+    "light": dict(INK="#12151B", PAPER="#F6F7F8", BG="#E3E5E8", MUTE="#555C67", RED="#C8102E", ONACCENT="#FFFFFF",
+                  LOGBG="#12151B", LOGFG="#C9CED6", SUBON="#C9D1FF"),
+    "dark": dict(INK="#E8EBF0", PAPER="#1B1F26", BG="#101318", MUTE="#97A0AD", RED="#FF6B7D", ONACCENT="#0D1015",
+                 LOGBG="#0A0C10", LOGFG="#C9CED6", SUBON="#1B2144"),
+    "contrast": dict(INK="#000000", PAPER="#FFFFFF", BG="#FFFFFF", MUTE="#222222", RED="#B00020", ONACCENT="#FFFFFF",
+                     LOGBG="#000000", LOGFG="#F2F2F2", SUBON="#E3E8FF"),
+}
+ACCENTS = {"blue": ("#1E3CFF", "#7089FF"), "green": ("#087443", "#3DCB92"), "orange": ("#C2410C", "#FF8F52"),
+           "violet": ("#6D28D9", "#A184FF"), "pink": ("#BE1E52", "#FF74A8")}  # (on a light theme, on the dark one)
+assert set(ACCENTS) == set(PRO_FIELDS["accent"][2])
 INK = "#12151B"
 PAPER = "#F6F7F8"
 BG = "#E3E5E8"
 BLUE = "#1E3CFF"
 MUTE = "#555C67"
 RED = "#C8102E"
-WHITE = "#FFFFFF"
+ONACCENT = "#FFFFFF"
+LOGBG, LOGFG, SUBON = "#12151B", "#C9CED6", "#C9D1FF"
+BORDER = 2  # the outline, in logical pixels
+SHADOW = True  # the hard shadow of the main button
+ANIM = True  # the blinking cursor while connecting
+ROW_H = 30  # a row of the server list, in logical pixels
 S = 1.0  # dpi scale, set once the root window exists
+FAMILY_PREF = "auto"  # see FONT_CHOICES
 
 
 def P(n):
     return max(1, int(round(n * S)))
+
+
+def BW():
+    """The outline's width in device pixels: at least 1, scaled like everything else."""
+    return max(1, int(round(BORDER * S)))
+
+
+def system_dark():
+    """Does the operating system use its dark appearance? False when that cannot be told."""
+    try:
+        if IS_WIN:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+                return int(winreg.QueryValueEx(k, "AppsUseLightTheme")[0]) == 0
+        if IS_MAC:
+            out = subprocess.run(["defaults", "read", "-g", "AppleInterfaceStyle"], capture_output=True, text=True, timeout=5)
+            return out.stdout.strip().lower() == "dark"
+        out = subprocess.run(["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"], capture_output=True, text=True, timeout=5)
+        return "dark" in out.stdout.lower() or "dark" in os.environ.get("GTK_THEME", "").lower()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def palette(d, dark=None):
+    """The colours of the design settings `d`: a dict with the THEMES keys plus BLUE and the resolved theme name.
+    `dark` = the system's appearance, asked for only when the theme is 'auto'."""
+    theme = d.get("theme", "light")
+    if theme == "auto":
+        theme = "dark" if (system_dark() if dark is None else dark) else "light"
+    t = dict(THEMES.get(theme, THEMES["light"]), theme=theme)
+    light, bright = ACCENTS.get(d.get("accent", "blue"), ACCENTS["blue"])
+    t["BLUE"] = d.get("accent_hex") or ("#0000D0" if theme == "contrast" else bright if theme == "dark" else light)
+    return t
+
+
+def apply_design(d, dark=None):
+    """Set the module's palette and metrics from the design settings `d` (clean_pro output). Called once, before any
+    widget exists: the widgets read these names when they are made."""
+    global INK, PAPER, BG, BLUE, MUTE, RED, ONACCENT, LOGBG, LOGFG, SUBON, BORDER, SHADOW, ANIM, ROW_H, FAMILY_PREF
+    t = palette(d, dark)
+    theme = t["theme"]
+    INK, PAPER, BG, MUTE, RED, ONACCENT = t["INK"], t["PAPER"], t["BG"], t["MUTE"], t["RED"], t["ONACCENT"]
+    LOGBG, LOGFG, SUBON, BLUE = t["LOGBG"], t["LOGFG"], t["SUBON"], t["BLUE"]
+    BORDER = int(d.get("border", 2))
+    SHADOW, ANIM = bool(d.get("shadow", True)), bool(d.get("anim", True))
+    ROW_H = {"compact": 24, "normal": 30, "roomy": 38}.get(d.get("density", "normal"), 30)
+    FAMILY_PREF = d.get("ui_font", "auto")
+    return theme
 
 
 def is_admin():
@@ -772,31 +695,54 @@ def enable_clipboard(w):
         w.bind("<Button-3>", popup)
 
 
-class Flat(tk.Label):
-    """Hard-edged text button: ink outline, inverts on hover and keyboard focus. `primary` = the default action (blue)."""
+class Flat(tk.Frame):
+    """Hard-edged text button: ink outline, inverts on hover and keyboard focus. `primary` = the default action (blue).
+    The outline is the frame itself, the text a Label inside: a Label's own highlight ring is not painted on macOS."""
+    _LABEL_OPTS = ("text", "font", "fg", "foreground", "bg", "background", "padx", "pady", "image", "anchor", "justify", "wraplength", "width")
+
     def __init__(self, master, text, command, font, primary=False):
-        rest_bg, rest_fg = (BLUE, WHITE) if primary else (PAPER, INK)
-        super().__init__(master, text=text, font=font, bg=rest_bg, fg=rest_fg, padx=P(12), pady=P(4), cursor="hand2",
-                         highlightthickness=P(2), highlightbackground=INK, highlightcolor=INK, takefocus=1)
+        super().__init__(master, bg=INK, padx=BW(), pady=BW(), cursor="hand2", takefocus=1)
+        self.rest = (BLUE, ONACCENT) if primary else (PAPER, INK)
+        self.lab = tk.Label(self, text=text, font=font, bg=self.rest[0], fg=self.rest[1], padx=P(12), pady=P(4), cursor="hand2")
+        self.lab.pack()
         self.command = command
-        for ev, bg, fg in (("<Enter>", INK, PAPER), ("<Leave>", rest_bg, rest_fg),
-                           ("<FocusIn>", INK, PAPER), ("<FocusOut>", rest_bg, rest_fg)):
-            self.bind(ev, lambda e, bg=bg, fg=fg: self.config(bg=bg, fg=fg))
-        self.bind("<Button-1>", lambda e: self.command())
+        for w in (self, self.lab):
+            w.bind("<Enter>", lambda e: self.paint(True))
+            w.bind("<Leave>", lambda e: self.paint(False))
+            w.bind("<Button-1>", lambda e: self.command())
+        self.bind("<FocusIn>", lambda e: self.paint(True))
+        self.bind("<FocusOut>", lambda e: self.paint(False))
         self.bind("<space>", lambda e: self.command())
         self.bind("<Return>", lambda e: self.command())
+
+    def paint(self, lit):
+        bg, fg = (INK, PAPER) if lit else self.rest
+        self.lab.config(bg=bg, fg=fg)
+
+    def configure(self, cnf=None, **kw):
+        kw = dict(cnf or {}, **kw)
+        lab = {k: kw.pop(k) for k in list(kw) if k in self._LABEL_OPTS}
+        if lab:
+            self.lab.configure(**lab)
+        return super().configure(**kw) if kw else None
+    config = configure
+
+    def cget(self, key):
+        return self.lab.cget(key) if key in self._LABEL_OPTS else super().cget(key)
 
 
 class Check(tk.Frame):
     def __init__(self, master, text, var, font):
-        super().__init__(master, bg=BG, cursor="hand2", takefocus=1, highlightthickness=P(2),
+        super().__init__(master, bg=BG, cursor="hand2", takefocus=1, highlightthickness=BW(),
                          highlightbackground=BG, highlightcolor=BLUE)
         self.var = var
-        self.box = tk.Label(self, width=2, font=font, highlightthickness=P(2), highlightbackground=INK, bd=0)
-        self.box.pack(side="left")
+        ring = tk.Frame(self, bg=INK, padx=BW(), pady=BW())
+        ring.pack(side="left")
+        self.box = tk.Label(ring, width=2, font=font, bd=0)
+        self.box.pack()
         self.lbl = tk.Label(self, text=text, font=font, bg=BG, fg=INK)
         self.lbl.pack(side="left", padx=P(10))
-        for w in (self, self.box, self.lbl):
+        for w in (self, ring, self.box, self.lbl):
             w.bind("<Button-1>", self.toggle)
         self.bind("<space>", self.toggle)
         var.trace_add("write", lambda *a: self.paint())
@@ -807,12 +753,27 @@ class Check(tk.Frame):
 
     def paint(self):
         on = self.var.get()
-        self.box.config(text="✓" if on else "", bg=BLUE if on else PAPER, fg=WHITE)
+        self.box.config(text="✓" if on else "", bg=BLUE if on else PAPER, fg=ONACCENT)
+
+
+def field(parent, var, width, font):
+    """A one-line text field with an even outline all round. Returns (outline frame, entry)."""
+    box = tk.Frame(parent, bg=INK, padx=BW(), pady=BW())
+    inner = tk.Frame(box, bg=PAPER)
+    inner.pack(fill="x")
+    e = tk.Entry(inner, textvariable=var, width=width, font=font, bg=PAPER, fg=INK, relief="flat", bd=0, highlightthickness=0,
+                 insertbackground=INK, selectbackground=BLUE, selectforeground=ONACCENT)
+    e.pack(fill="x", ipady=P(3), padx=P(6))
+    return box, e
 
 
 def ui_family(widget):
+    """The interface font: the one the design settings ask for if this system has it, else the closest default."""
     fams = set(tkfont.families(widget))
-    return next((f for f in UI_FONTS if f in fams), UI_FONTS[-1])
+    for name in FONT_CHOICES.get(FAMILY_PREF, UI_FONTS) + UI_FONTS:
+        if name in fams:
+            return name
+    return UI_FONTS[-1]
 
 
 class Dialog(tk.Toplevel):
@@ -834,7 +795,7 @@ class Dialog(tk.Toplevel):
         set_window_icon(self)
         fam = ui_family(self)
         body = tk.Frame(self, bg=BG)
-        body.pack(padx=P(3), pady=P(3))
+        body.pack(padx=BW() + P(1), pady=BW() + P(1))
         tk.Frame(body, bg=RED if kind == "error" else BLUE, width=P(10)).pack(side="left", fill="y")
         inner = tk.Frame(body, bg=BG)
         inner.pack(side="left", padx=P(22), pady=P(20))
@@ -889,14 +850,14 @@ def ask_yes_no(parent, text, yes="Да", no="Нет"):
 
 
 class Segmented(tk.Frame):
-    """A row of hard-edged options of which one is selected (blue). Reads and writes a StringVar."""
-    def __init__(self, master, options, var, font):
-        super().__init__(master, bg=BG)
+    """A row of hard-edged options of which one is selected (accent). Reads and writes a StringVar; `labels` maps an
+    option to the text shown for it."""
+    def __init__(self, master, options, var, font, labels=None):
+        super().__init__(master, bg=INK, padx=BW(), pady=BW())  # the frame is the outline and, in the gaps, the dividers
         self.var, self.buttons = var, {}
-        for o in options:
-            b = tk.Label(self, text=o, font=font, padx=P(10), pady=P(3), cursor="hand2", bd=0,
-                         highlightthickness=P(2), highlightbackground=INK)
-            b.pack(side="left")
+        for i, o in enumerate(options):
+            b = tk.Label(self, text=(labels or {}).get(o, o), font=font, padx=P(10), pady=P(3), cursor="hand2", bd=0)
+            b.pack(side="left", padx=(0 if i == 0 else BW(), 0))
             b.bind("<Button-1>", lambda e, o=o: var.set(o))
             self.buttons[o] = b
         var.trace_add("write", lambda *a: self.paint())
@@ -905,11 +866,27 @@ class Segmented(tk.Frame):
     def paint(self):
         for o, b in self.buttons.items():
             on = self.var.get() == o
-            b.config(bg=BLUE if on else PAPER, fg=WHITE if on else INK)
+            b.config(bg=BLUE if on else PAPER, fg=ONACCENT if on else INK)
 
 
 # (key, label, widget, hint) per section of the advanced settings window; the order here is the order on screen
+PRO_NARROW = ("ui_scale", "border", "win_width", "alpha", "accent_hex")  # short numbers and a colour
 PRO_LAYOUT = (
+    ("Оформление", (
+        ("theme", "Тема", "choice", "«Как в системе» берёт светлую или тёмную у вашей системы."),
+        ("accent", "Цвет акцента", "choice", None),
+        ("accent_hex", "Свой цвет акцента", "entry", "Вида #1E3CFF. Если заполнено, берётся он, а не цвет из списка."),
+        ("ui_scale", "Масштаб интерфейса, %", "entry", "От 70 до 180. Поверх масштаба самой системы."),
+        ("density", "Список серверов", "choice", None),
+        ("ui_font", "Шрифт", "choice", "«Как задумано» — узкий шрифт системы; если его нет, берётся ближайший."),
+        ("border", "Толщина рамок, пикселей", "entry", "От 1 до 4."),
+        ("win_width", "Ширина окна, пикселей", "entry", "От 380 до 900. Если не помещается текст, окно станет шире само."),
+        ("shadow", "Тень у большой кнопки", "check", None),
+        ("anim", "Мигающий курсор при подключении", "check", None),
+        ("remember_window", "Помнить, где стояло окно", "check", None),
+        ("on_top", "Окно поверх остальных", "check", None),
+        ("alpha", "Непрозрачность окна, %", "entry", "100 — совсем непрозрачное. На некоторых Linux не работает."),
+    )),
     ("Соединение", (
         ("mixed_port", "Порт локального прокси", "entry", "Для программ, которым нужен адрес прокси: 127.0.0.1 и этот порт."),
         ("tun_stack", "Режим сетевого адаптера", "choice", "Если сайты не открываются или тормозят, попробуй system или gvisor."),
@@ -934,6 +911,39 @@ PRO_LAYOUT = (
         ("log_level", "Подробность журнала ядра", "choice", "debug пишет всё подряд, error только ошибки."),
     )),
 )
+
+
+class Preview(tk.Canvas):
+    """A small picture of the main button and two controls in the colours the form currently holds, so a theme or an
+    accent can be judged before the program is restarted."""
+    def __init__(self, master, family, values):
+        super().__init__(master, height=P(104), highlightthickness=0, bd=0)
+        self.family, self.values = family, values
+        self.bind("<Configure>", lambda e: self.draw())
+
+    def draw(self):
+        self.delete("all")
+        try:
+            v = clean_pro({k: var.get() for k, var in self.values().items()})[0]
+            t = palette(v)
+        except Exception:  # noqa: BLE001
+            return
+        bw = max(1, int(round(v["border"] * S)))
+        self.configure(bg=t["BG"])
+        w, o = max(self.winfo_width(), P(300)), (P(8) if v["shadow"] else 0)
+        x1, y1 = w - P(16) - o, P(60)
+        if o:
+            self.create_rectangle(P(8) + o, P(8) + o, x1 + o, y1 + o, fill=t["INK"], outline=t["INK"])
+        self.create_rectangle(P(8), P(8), x1, y1, fill=t["PAPER"], outline=t["INK"], width=max(1, int(bw * 1.5)))
+        self.create_text(P(22), P(26), text="Подключить", anchor="w", fill=t["INK"], font=(self.family, 15, "bold"))
+        self.create_text(P(22), P(47), text="Быстрейший из списка", anchor="w", fill=t["MUTE"], font=(self.family, 9))
+        bx = P(8)
+        for text, fill, fg in (("Обновить", t["PAPER"], t["INK"]), ("Выбрано", t["BLUE"], t["ONACCENT"]), ("Ошибка", t["RED"], t["ONACCENT"])):
+            tw = P(78)
+            self.create_rectangle(bx, P(74), bx + tw, P(98), fill=t["INK"], outline=t["INK"])
+            self.create_rectangle(bx + bw, P(74) + bw, bx + tw - bw, P(98) - bw, fill=fill, outline=fill)
+            self.create_text(bx + tw // 2, P(86), text=text, fill=fg, font=(self.family, 9))
+            bx += tw + P(8)
 
 
 class ProWindow(tk.Toplevel):
@@ -971,29 +981,41 @@ class ProWindow(tk.Toplevel):
         pad.pack(fill="both", expand=True, padx=P(22), pady=P(18))
 
         tk.Label(pad, text="Расширенные настройки", font=f_h, bg=BG, fg=INK).pack(anchor="w")
+        self.preview = None
         tk.Label(pad, text="Для опытных пользователей. Обычно здесь ничего менять не нужно. Если значение не подойдёт, "
                            "программа вернёт обычное и всё равно подключится.", font=f_s, bg=BG, fg=MUTE, wraplength=P(500),
                  justify="left", anchor="w").pack(anchor="w", pady=(P(4), 0))
         for title, rows in PRO_LAYOUT:
             tk.Label(pad, text=title, font=f_h, bg=BG, fg=INK).pack(anchor="w", pady=(P(18), P(6)))
+            if title == "Оформление":
+                self.preview = Preview(pad, fam, lambda: self.vars)
+                self.preview.pack(fill="x", pady=(0, P(10)))
             for key, label, kind, hint in rows:
                 self.add_row(pad, key, label, kind, hint, cur[key], fam)
+        if self.preview:
+            for var in self.vars.values():
+                var.trace_add("write", lambda *a: self.preview.draw())
 
         # fixed footer
         self.msg = tk.Label(self, text="", font=f_s, bg=BG, fg=MUTE, anchor="w", justify="left", wraplength=P(500))
         self.msg.pack(fill="x", padx=P(22), pady=(P(8), 0))
         foot = tk.Frame(self, bg=BG)
         foot.pack(fill="x", padx=P(22), pady=P(14))
-        Flat(foot, "Закрыть", self.close, f_s).pack(side="right")
-        Flat(foot, "Применить", self.apply, f_s, primary=True).pack(side="right", padx=(0, P(8)))
-        Flat(foot, "По умолчанию", self.reset, f_s).pack(side="left")
-        Flat(foot, "Папка данных", lambda: self.tool(DATA), f_s).pack(side="left", padx=(P(8), 0))
-        Flat(foot, "Журнал", lambda: self.tool(LOGFILE), f_s).pack(side="left", padx=(P(8), 0))
+        tools = tk.Frame(foot, bg=BG)
+        tools.pack(fill="x")
+        Flat(tools, "По умолчанию", self.reset, f_s).pack(side="left")
+        Flat(tools, "Папка данных", lambda: self.tool(DATA), f_s).pack(side="left", padx=(P(8), 0))
+        Flat(tools, "Журнал", lambda: self.tool(LOGFILE), f_s).pack(side="left", padx=(P(8), 0))
+        acts = tk.Frame(foot, bg=BG)
+        acts.pack(fill="x", pady=(P(8), 0))
+        Flat(acts, "Закрыть", self.close, f_s).pack(side="right")
+        Flat(acts, "Применить", self.apply, f_s, primary=True).pack(side="right", padx=(0, P(8)))
+        self.restart_btn = Flat(acts, "Перезапустить", self.restart, f_s)  # shown once something needs a restart
 
         self.bind("<Escape>", lambda e: self.close())
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.update_idletasks()
-        w = P(580)
+        w = min(max(P(580), pad.winfo_reqwidth() + P(44) + P(16)), max(P(480), self.winfo_screenwidth() - P(40)))
         need = body.winfo_reqheight() + self.msg.winfo_reqheight() + foot.winfo_reqheight() + P(30)
         h = min(need, max(P(420), self.winfo_screenheight() - P(160)))
         if need > h:  # does not fit the screen: scroll
@@ -1020,7 +1042,7 @@ class ProWindow(tk.Toplevel):
             var = tk.BooleanVar(value=bool(value))
             Check(row, label, var, f_b).pack(anchor="w")
         else:
-            wide = key == "auto_url"  # the address needs the whole width: label above it; the rest sit beside their label
+            wide = key in ("auto_url", "theme", "accent", "ui_font")  # these need the whole width: label above; the rest sit beside their label
             line = tk.Frame(row, bg=BG)
             line.pack(fill="x")
             lab = tk.Label(line, text=label, font=f_b, bg=BG, fg=INK, anchor="w", justify="left", wraplength=P(330 if not wide else 500))
@@ -1028,14 +1050,11 @@ class ProWindow(tk.Toplevel):
             self.labels[key] = lab
             var = tk.StringVar(value=str(value))
             if kind == "choice":
-                Segmented(line, PRO_FIELDS[key][2], var, f_b).pack(side="right")
+                seg = Segmented(line, PRO_FIELDS[key][2], var, f_b, PRO_LABELS.get(key))
+                seg.pack(side="right") if not wide else seg.pack(anchor="w", pady=(P(4), 0))
             else:
-                box = tk.Frame(line, bg=INK, padx=P(2), pady=P(2))
+                box, e = field(line, var, 50 if key == "auto_url" else 10 if key in PRO_NARROW else 14, f_b)
                 box.pack(fill="x", pady=(P(3), 0)) if wide else box.pack(side="right")
-                e = tk.Entry(box, textvariable=var, width=50 if key == "auto_url" else 14, font=f_b, bg=PAPER, fg=INK,
-                             relief="flat", bd=0, highlightthickness=0, insertbackground=INK, selectbackground=BLUE,
-                             selectforeground=WHITE)
-                e.pack(fill="x", ipady=P(3), padx=P(5))
                 e.bind("<Return>", lambda ev: self.apply())
                 enable_clipboard(e)
                 self.boxes[key] = box
@@ -1061,12 +1080,22 @@ class ProWindow(tk.Toplevel):
         self.app.save(sources=False)
         for k, var in self.vars.items():
             var.set(clean[k] if isinstance(var, tk.BooleanVar) else str(clean[k]))
+        self.app.apply_live()
         note = "Сохранено."
         if self.app.state != "off":
-            note += " Изменения заработают при следующем подключении."
-            self.app.say("Расширенные настройки сохранены. Они заработают при следующем подключении.")
+            note += " Настройки соединения заработают при следующем подключении."
+            self.app.say("Расширенные настройки сохранены. Настройки соединения заработают при следующем подключении.")
+        if any(clean[k] != self.app.design[k] for k in RESTART_KEYS):
+            note += " Тема, цвета, масштаб, шрифт и рамки применятся после перезапуска программы."
+            self.restart_btn.pack(side="right", padx=(0, P(8)))
+        else:
+            self.restart_btn.pack_forget()
         self.msg.config(text=note, fg=MUTE)
         return True
+
+    def restart(self):
+        if self.apply():
+            self.app.restart()
 
     def reset(self):
         for k, var in self.vars.items():
@@ -1125,7 +1154,7 @@ class FlagImages:
         if img is None:
             w, h = P(24), P(16)
             img = tk.PhotoImage(master=self.master, width=w + P(9), height=h)  # transparent right margin = gap before the text
-            img.put(flags.to_tk_data(flags.render(code, w, h, max(1, P(1)))))
+            img.put(flags.to_tk_data(flags.render(code, w, h, max(1, P(1)), accent=BLUE, ink=INK)))
             self.cache[code] = img
         return img
 
@@ -1172,15 +1201,17 @@ class Power(tk.Canvas):
 
     def draw(self):
         self.delete("all")
-        w, h, o = self.winfo_width(), self.H, P(9)
+        w, h = self.winfo_width(), self.H
+        o = P(9) if SHADOW else P(3)  # without a shadow the slab still presses in a little
         d = o if self.pressed else 0
         x1, y1 = w - o + d, h - o + d
-        self.create_rectangle(o, o, w, h, fill=INK, outline=INK)
+        if SHADOW:
+            self.create_rectangle(o, o, w, h, fill=INK, outline=INK)
         on = self.state == "on"
         fill = BLUE if on else PAPER
-        fg = WHITE if on else INK
-        sub = "#C9D1FF" if on else MUTE
-        self.create_rectangle(d + 2, d + 2, x1, y1, fill=fill, outline=INK, width=P(3))
+        fg = ONACCENT if on else INK
+        sub = SUBON if on else MUTE
+        self.create_rectangle(d + 2, d + 2, x1, y1, fill=fill, outline=INK, width=max(1, int(round(BORDER * 1.5 * S))))
         title = {"off": "Подключить", "connecting": "Подключаю", "on": "Отключить"}[self.state]
         if self.state == "connecting":
             title += " █" if self.blink else ""
@@ -1197,7 +1228,8 @@ class Power(tk.Canvas):
             self.create_rectangle(d + P(10), d + P(10), x1 - P(8), y1 - P(8), outline=fg, dash=(3, 3))
 
 
-PROTO = {"shadowsocks": "SS", "hysteria2": "HY2", "vless": "VLESS", "vmess": "VMESS", "trojan": "TROJAN", "tuic": "TUIC"}
+PROTO = {"shadowsocks": "SS", "hysteria2": "HY2", "hysteria": "HY1", "vless": "VLESS", "vmess": "VMESS", "trojan": "TROJAN",
+         "tuic": "TUIC", "anytls": "ANYTLS", "socks": "SOCKS"}
 
 # ---------- speed test ----------
 TEST_BASE_PORT = 21080
@@ -1725,7 +1757,13 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         global S
-        S = max(1.0, float(self.tk.call("tk", "scaling")) / 1.3333)
+        self.design = load_design()  # the look is fixed before the first widget is made
+        base = float(self.tk.call("tk", "scaling"))
+        factor = self.design["ui_scale"] / 100
+        S = max(1.0, base / 1.3333) * factor
+        if factor != 1.0:
+            self.tk.call("tk", "scaling", base * factor)  # fonts are in points: they follow
+        apply_design(self.design)
         def on_error(*a):
             log_crash(*a)
             if time.time() - getattr(self, "_last_err", 0.0) < 30:  # an error repeating every half second must not pile up dialogs
@@ -1749,10 +1787,10 @@ class App(tk.Tk):
         set_window_icon(self)
         self.configure(bg=BG)
         avail = self.avail_height()
-        self.geometry(f"{P(480)}x{min(P(840), avail)}")
-        self.minsize(P(440), min(P(560), avail))  # never taller than the screen can show, whatever its size and scaling
-        fams = set(tkfont.families())
-        fam = next((f for f in UI_FONTS if f in fams), UI_FONTS[-1])
+        width = P(self.design["win_width"])
+        self.geometry(f"{width}x{min(P(840), avail)}")
+        self.minsize(min(P(440), width), min(P(560), avail))  # never taller than the screen can show, whatever its size and scaling
+        fam = ui_family(self)
         self.fam = fam
         self.f_h, self.f_b, self.f_s = (fam, FZ(12), "bold"), (fam, FZ(11)), (fam, FZ(10))
         self.proc = None
@@ -1821,8 +1859,8 @@ class App(tk.Tk):
         st = ttk.Style(self)
         st.theme_use("clam")
         st.configure("T.Treeview", background=PAPER, fieldbackground=PAPER, foreground=INK, borderwidth=0,
-                     rowheight=P(30), font=self.f_b)
-        st.map("T.Treeview", background=[("selected", INK)], foreground=[("selected", WHITE)])
+                     rowheight=P(ROW_H), font=self.f_b)
+        st.map("T.Treeview", background=[("selected", INK)], foreground=[("selected", PAPER)])
         st.layout("T.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
         # rows are flag + name: drop the expander arrow's empty space on the left
         st.layout("T.Treeview.Item", [("Treeitem.padding", {"sticky": "nswe", "children": [
@@ -1852,7 +1890,7 @@ class App(tk.Tk):
             self.bind_all(ev, self.on_body_wheel, add="+")
 
         if IS_WIN and not is_admin():
-            tk.Label(root, text="Нужны права администратора", font=self.f_s, bg=RED, fg=WHITE,
+            tk.Label(root, text="Нужны права администратора", font=self.f_s, bg=RED, fg=ONACCENT,
                      padx=P(8), pady=P(4)).pack(fill="x", pady=(0, P(12)))
 
         self.power = Power(root, self.toggle, fam)
@@ -1867,14 +1905,17 @@ class App(tk.Tk):
         self.count.pack(side="right", padx=(P(10), 0))
         self.test_btn = Flat(row, "Тест скорости", self.run_test, self.f_s)
         self.test_btn.pack(side="right")
-        frame = tk.Frame(root, bg=INK, padx=P(2), pady=P(2))
+        frame = tk.Frame(root, bg=INK, padx=BW(), pady=BW())
         frame.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(frame, style="T.Treeview", columns=("ping", "speed", "proto"), show="tree",
                                  selectmode="browse", height=6)
         self.tree.column("#0", anchor="w", stretch=True, width=P(170))  # flag + server name
-        self.tree.column("ping", anchor="e", width=P(58), stretch=False)
-        self.tree.column("speed", anchor="e", width=P(88), stretch=False)
-        self.tree.column("proto", anchor="e", width=P(62), stretch=False)
+        meter = tkfont.Font(self, font=self.f_b)
+        self.col_w = {"ping": meter.measure("0000 мс") + P(20), "speed": meter.measure("000 Мбит/с") + P(20),
+                      "proto": max(meter.measure(n) for n in PROTO.values()) + P(20)}
+        self.tree.column("ping", anchor="e", width=self.col_w["ping"], stretch=False)
+        self.tree.column("speed", anchor="e", width=self.col_w["speed"], stretch=False)
+        self.tree.column("proto", anchor="e", width=self.col_w["proto"], stretch=False)
         sb = ttk.Scrollbar(frame, orient="vertical", style="Flat.Vertical.TScrollbar", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
@@ -1891,12 +1932,12 @@ class App(tk.Tk):
         Check(root, "Российские сайты напрямую, без VPN", self.ru, self.f_b).pack(anchor="w")
         tk.Label(root, text="Свои домены напрямую, через пробел", font=self.f_s, bg=BG, fg=MUTE,
                  anchor="w").pack(fill="x", pady=(P(10), P(4)))
-        eb = tk.Frame(root, bg=INK, padx=P(2), pady=P(2))
+        eb = tk.Frame(root, bg=INK, padx=BW(), pady=BW())
         eb.pack(fill="x")
         inner = tk.Frame(eb, bg=PAPER)
         inner.pack(fill="x")
         self.extra = tk.Entry(inner, font=self.f_b, bg=PAPER, fg=INK, relief="flat", bd=0, highlightthickness=0,
-                              insertbackground=INK, selectbackground=BLUE, selectforeground=WHITE)
+                              insertbackground=INK, selectbackground=BLUE, selectforeground=ONACCENT)
         self.extra.pack(fill="x", ipady=P(5), padx=P(6))
         self.extra.insert(0, self.cfg["extra"])
 
@@ -1906,18 +1947,18 @@ class App(tk.Tk):
         Flat(row, "Вставить", self.paste_clip, self.f_s).pack(side="right", padx=(0, P(8)))
         self.sub_note = tk.Label(row, text="", font=self.f_s, bg=BG, fg=MUTE)
         self.sub_note.pack(side="left", padx=(P(10), 0))
-        sbx = self.sbx = tk.Frame(root, bg=INK, padx=P(2), pady=P(2))  # last block of the content; the panels open right below it
+        sbx = self.sbx = tk.Frame(root, bg=INK, padx=BW(), pady=BW())  # last block of the content; the panels open right below it
         sbx.pack(fill="x")
         self.src = tk.Text(sbx, height=3, wrap="char", font=(MONO, FZ(9)), bg=PAPER, fg=INK, relief="flat", bd=0,
                            highlightthickness=0, insertbackground=INK, selectbackground=BLUE,
-                           selectforeground=WHITE, padx=P(6), pady=P(5))
+                           selectforeground=ONACCENT, padx=P(6), pady=P(5))
         self.src.pack(fill="x")
         self.src.insert("1.0", self.cfg["sources"])
 
         # log (folded)
         self.log_open = False
-        self.log_box = tk.Frame(root, bg=INK, padx=P(2), pady=P(2))
-        self.log = tk.Text(self.log_box, height=8, state="disabled", bg=INK, fg="#C9CED6", font=(MONO, FZ(9)),
+        self.log_box = tk.Frame(root, bg=INK, padx=BW(), pady=BW())
+        self.log = tk.Text(self.log_box, height=8, state="disabled", bg=LOGBG, fg=LOGFG, font=(MONO, FZ(9)),
                            relief="flat", bd=0, highlightthickness=0, selectbackground=BLUE, padx=P(6), pady=P(5))
         self.log.pack(fill="both", expand=True)
 
@@ -1976,6 +2017,8 @@ class App(tk.Tk):
         self._pump_id = self.after(50, self.pump)
         self.start_instance_server()
         self.after(300, self.refresh_due)
+        self.restore_window()
+        self.apply_live()
         self.after(120, lambda: self.fit_height(P(840)))
         self._tick_id = self.after(500, self.tick)
         self.after(1500, self.update_startup)
@@ -2069,7 +2112,19 @@ class App(tk.Tk):
         row = tk.Frame(parent, bg=BG)
         row.pack(fill="x", pady=(P(18), P(6)))
         tk.Label(row, text=title, font=self.f_h, bg=BG, fg=INK).pack(side="left")
+        self._rows = getattr(self, "_rows", []) + [row]
         return row
+
+    def needed_width(self):
+        """The narrowest the window may be for its rows (a title, a note and two buttons side by side; the server list with
+        all its columns; the footer) not to overlap, whatever font the system or the settings gave it."""
+        try:
+            self.update_idletasks()
+            rows = max([r.winfo_reqwidth() for r in getattr(self, "_rows", [])] + [self.foot.winfo_reqwidth()] + [0]) + P(24)
+            tree = sum(self.col_w.values()) + P(170) + P(10) + 4 * BW() + P(8)
+            return max(rows, tree) + 2 * P(22) + P(4)
+        except (tk.TclError, AttributeError):
+            return 0
 
     def quiet_link(self, parent, text, command, double=None):
         """A small grey text link: dark and underlined only while hovered or while its panel is open.
@@ -2130,7 +2185,7 @@ class App(tk.Tk):
         self.log_head.open = self.log_open
         self.log_head.paint(False)
         if self.log_open:
-            self.log_box.pack(fill="x", after=self.set_box if self.set_open else self.sbx)  # panels open above the footer, which never moves
+            self.log_box.pack(fill="x", pady=(P(12), 0), after=self.set_box if self.set_open else self.sbx)  # panels open above the footer, which never moves
         else:
             self.log_box.pack_forget()
         self.fit_height()
@@ -2228,9 +2283,11 @@ class App(tk.Tk):
             if self.winfo_reqheight() <= avail or rows <= 2:
                 break
             rows -= 1
-        w = self.winfo_width()
+        w = max(self.winfo_width() if self.winfo_width() > 100 else P(self.design["win_width"]), self.needed_width())
+        w = min(w, max(P(440), self.winfo_screenwidth() - P(40)))
         h = min(max(self.winfo_reqheight(), min(floor or P(760), avail)), avail)
-        self.geometry(f"{w if w > 100 else P(480)}x{h}")
+        self.minsize(min(P(440), w), self.minsize()[1])
+        self.geometry(f"{w}x{h}")
         self.update_idletasks()
         self.keep_on_screen()
         self.sync_scroll()
@@ -2240,7 +2297,7 @@ class App(tk.Tk):
         self.set_head.open = self.set_open
         self.set_head.paint(False)
         if self.set_open:
-            self.set_box.pack(fill="x", after=self.sbx)
+            self.set_box.pack(fill="x", pady=(P(12), 0), after=self.sbx)
         else:
             self.set_box.pack_forget()
         self.fit_height()
@@ -2421,7 +2478,7 @@ class App(tk.Tk):
         """Show the servers saved from the last good fetch right away, before touching the network."""
         urls, inline = split_sources(self.cfg["sources"])
         self.subs = {u: s for u, s in self.subs.items() if u in urls and s.get("outs")}
-        self.inline = [o for line in inline for o in parse_text(line)]
+        self.inline = parse_inline(inline)[0]
         if self.subs or self.inline:
             self.apply_outs()
 
@@ -2436,7 +2493,12 @@ class App(tk.Tk):
             self.reload_pending = self.reload_pending or manual
             return
         if manual:
-            self.cfg["sources"] = self.src.get("1.0", "end").strip()
+            raw = self.src.get("1.0", "end").strip()
+            tidy = "\n".join(source_lines(raw))  # "open in the app" links unwrapped, quotes and stray words gone
+            if tidy and tidy != raw:
+                self.src.delete("1.0", "end")
+                self.src.insert("1.0", tidy)
+            self.cfg["sources"] = tidy or raw
             self.count.config(text="Загрузка…")
         urls, inline = split_sources(self.cfg["sources"])
         targets = urls if manual else [u for u in only if u in urls]
@@ -2448,15 +2510,17 @@ class App(tk.Tk):
 
         def work():
             got = {u: fetch_source(u, prefer[u], via) for u in targets}
-            inline_outs = [o for line in inline for o in parse_text(line)]
-            self._ui(lambda: self.loaded(got, inline_outs, urls, manual, silent))
+            inline_outs, inline_skipped = parse_inline(inline)
+            self._ui(lambda: self.loaded(got, inline_outs, urls, manual, silent, inline_skipped))
         threading.Thread(target=work, daemon=True).start()
 
-    def loaded(self, got, inline_outs, urls, manual, silent):
+    def loaded(self, got, inline_outs, urls, manual, silent, inline_skipped=None):
         self.loading = False
         now = time.time()
         errors, changed = [], manual
+        left_out = Counter(inline_skipped or {})
         for u, (outs, info, ua, errs) in got.items():
+            left_out.update((info or {}).get("skipped") or {})
             if outs:
                 changed = changed or self.subs.get(u, {}).get("outs") != outs
                 self.subs[u] = {"outs": outs, "info": info, "time": now, "ua": ua}
@@ -2475,6 +2539,9 @@ class App(tk.Tk):
             self.apply_outs(errors, manual, silent)
         else:
             self.note_subs()
+        if manual and left_out and self.outs:  # servers the core cannot run: say which and why, once
+            now_text = self.status.cget("text")
+            self.say((now_text + " " if now_text else "") + skipped_note(left_out), err=bool(errors))
         if self.reload_pending:
             self.reload_pending = False
             self.load()
@@ -2933,6 +3000,64 @@ class App(tk.Tk):
         """The advanced settings in force (defaults where the user changed nothing or typed something unusable)."""
         return clean_pro(self.cfg.get("pro"))[0]
 
+    def apply_live(self):
+        """The design settings that need no restart: opacity, always on top, the button's shadow, blinking, width."""
+        global SHADOW, ANIM
+        pro = self.pro()
+        SHADOW, ANIM = bool(pro["shadow"]), bool(pro["anim"])
+        for attr, value in (("-alpha", pro["alpha"] / 100), ("-topmost", bool(pro["on_top"]))):
+            try:
+                self.attributes(attr, value)
+            except tk.TclError:  # not every window manager has it
+                pass
+        try:
+            self.power.draw()
+            w = P(pro["win_width"])
+            self.minsize(min(P(440), w), self.minsize()[1])
+            if abs(self.winfo_width() - w) > 2:
+                self.geometry(f"{w}x{self.winfo_height()}")
+                self.keep_on_screen()
+        except (tk.TclError, AttributeError):
+            pass
+
+    def remember_window(self):
+        """Keep where the window stands and how wide it is, if the settings ask for it."""
+        try:
+            if self.pro()["remember_window"] and self.winfo_viewable():
+                self.cfg["win"] = {"x": self.winfo_x(), "y": self.winfo_y(), "w": self.winfo_width()}
+        except (tk.TclError, AttributeError):
+            pass
+
+    def restore_window(self):
+        """Put the window back where it was, if that place is still on a screen."""
+        try:
+            w = self.cfg.get("win")
+            if not (self.pro()["remember_window"] and isinstance(w, dict)):
+                return
+            x, y, width = int(w["x"]), int(w["y"]), int(w["w"])
+            top, bottom = self.work_area()
+            if not (-P(200) < x < self.winfo_screenwidth() - P(120) and top - P(20) <= y < bottom - P(120) and P(380) <= width <= P(1200)):
+                return
+            self.geometry(f"{width}x{self.winfo_height()}+{x}+{y}")
+        except (KeyError, TypeError, ValueError, tk.TclError):
+            pass
+
+    def restart(self):
+        """Start this program again (the look is read at start). The VPN is off for the moment."""
+        if self.state != "off" and not ask_yes_no(self, "Чтобы применить оформление, программа перезапустится. VPN на это "
+                                                  "время выключится, потом его можно включить снова.\n\nПерезапустить?",
+                                                  "Перезапустить", "Не сейчас"):
+            return
+        cmd = [sys.executable] if self.frozen() else [sys.executable, os.path.abspath(__file__)]
+        env = dict(updater.fresh_env(), FIMA_WAIT_PID=str(os.getpid()))
+        extra = {"creationflags": 0x00000008 | 0x00000200 | NOWIN} if IS_WIN else {"start_new_session": True}
+        try:
+            subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             close_fds=True, **extra)
+        except OSError:
+            return self.say("Не получилось перезапустить. Закрой программу и открой её снова.", err=True)
+        self.quit_app()
+
     def may_restart(self):
         """At most 3 automatic reconnects in 10 minutes: a core that keeps dying must not loop forever."""
         now = time.time()
@@ -3021,7 +3146,7 @@ class App(tk.Tk):
 
     def _tick(self):
         self.n += 1
-        self.blink = not self.blink
+        self.blink = (not self.blink) if ANIM else True
         if self.state in ("on", "connecting"):
             self.refresh_power()
         if self.n % 2 == 0:
@@ -3074,7 +3199,7 @@ class App(tk.Tk):
         self.focus_force()
         try:
             self.attributes("-topmost", True)  # Windows only lets a window forward if it asks like this
-            self.after(300, lambda: self.attributes("-topmost", False))
+            self.after(300, lambda: self.attributes("-topmost", bool(self.pro()["on_top"])))
         except tk.TclError:
             pass
 
@@ -3083,6 +3208,7 @@ class App(tk.Tk):
         self.toggle()
 
     def hide_to_tray(self):
+        self.remember_window()
         self.withdraw()
         if not self.cfg.get("tray_hint_shown") and self.tray:
             self.tray.notify("Программа работает в трее. Чтобы выйти совсем, выбери «Выход» в меню значка.")
@@ -3097,6 +3223,7 @@ class App(tk.Tk):
 
     def quit_app(self):
         self.quitting = True
+        self.remember_window()
         self.save()
         self.test_stop.set()
         for p in (self.test_proc, HOME_PROC):
@@ -3192,6 +3319,28 @@ def signal_running_instance():
         return False
 
 
+def wait_for_exit(pid, seconds=15):
+    """Block until process `pid` is gone (the copy that restarted us), at most `seconds`."""
+    end = time.time() + seconds
+    if IS_WIN:
+        try:
+            k = ctypes.windll.kernel32
+            k.OpenProcess.restype = ctypes.c_void_p
+            h = k.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+            if h:
+                k.WaitForSingleObject(ctypes.c_void_p(h), int(seconds * 1000))
+                k.CloseHandle(ctypes.c_void_p(h))
+        except Exception:  # noqa: BLE001
+            time.sleep(1.5)
+        return
+    while time.time() < end:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.2)
+
+
 def swap_selftest(new_exe):
     """`--swap-selftest <file>` in a packaged build: copy <file> over this program the way an update does and let the
     helper start it. CI checks that the started copy runs (a packaged program that cannot restart itself is the
@@ -3263,6 +3412,9 @@ if __name__ == "__main__":
         sys.exit(0)
     if "--net-selftest" in sys.argv:  # packaged build, CI: can it open https sites at all?
         sys.exit(net_selftest())
+    _wait = os.environ.pop("FIMA_WAIT_PID", "")
+    if _wait.isdigit():  # we were started by a copy that is closing: wait until it is gone (single-instance lock)
+        wait_for_exit(int(_wait))
     if not any(a in sys.argv for a in ("--selftest", "--tray-selftest")) and already_running():
         if not signal_running_instance():  # it did not answer: say so, in the app's style
             _r = tk.Tk()
@@ -3286,6 +3438,13 @@ if __name__ == "__main__":
         app = App()
     except Exception:  # noqa: BLE001
         log_crash(*sys.exc_info())
+        try:  # most likely a design setting the system cannot do: the default look, nothing else touched
+            DESIGN_SAFE = True
+            app = App()
+            app.mainloop()
+            sys.exit(0)
+        except Exception:  # noqa: BLE001
+            log_crash(*sys.exc_info())
         for _p in (SETTINGS, SUBCACHE, EXITFILE):  # most likely a damaged data file: keep it as .bad and start clean
             try:
                 os.replace(_p, _p + ".bad")

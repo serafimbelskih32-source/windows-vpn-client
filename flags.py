@@ -239,16 +239,20 @@ def pixel(ops, u, v, aspect):
     return out
 
 
-def render(code, w, h, border=1):
-    """Pixel rows (lists of '#rrggbb') for a w x h flag with an ink outline of `border` pixels."""
+def render(code, w, h, border=1, accent=None, ink=None):
+    """Pixel rows (lists of '#rrggbb') for a w x h flag with an outline of `border` pixels in `ink` (default: dark).
+    `accent` recolours the blue of the "fastest of the list" badge."""
     ops = FLAGS.get(code) or FLAGS["??"]
+    if accent and code == "AUTO":
+        ops = [(op[0], accent) + tuple(op[2:]) if op[1] == "#1E3CFF" else op for op in ops]
+    edge = ink or INK
     aspect = w / h
     rows = []
     for yy in range(h):
         row = []
         for xx in range(w):
             if xx < border or yy < border or xx >= w - border or yy >= h - border:
-                row.append(INK)
+                row.append(edge)
                 continue
             iu, iv = (xx - border + 0.5) / (w - 2 * border), (yy - border + 0.5) / (h - 2 * border)
             row.append(pixel(ops, iu, iv, aspect) or "#C7CBD1")
