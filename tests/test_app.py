@@ -974,6 +974,68 @@ vpn.start_core = lambda path: started.append(path) or LiveProc()
 app13.state = "off"
 app13.proc = None
 
+# 5b. a proxy left behind in Windows by another program
+asked = []
+disabled = []
+real_asks = (vpn.ask_yes_no, vpn.local_proxy_state, vpn.disable_system_proxy)
+vpn.disable_system_proxy = lambda: disabled.append(1) or True
+vpn.local_proxy_state = lambda: ("127.0.0.1:3067", False)
+vpn.ask_yes_no = lambda parent, text, yes="Да", no="Нет": asked.append((text, yes, no)) or True
+started.clear()
+app13.state = "off"
+app13.proc = None
+app13.toggle()
+check("dead system proxy: asked in plain words, the address named, one click to switch it off",
+      asked and "127.0.0.1:3067" in asked[-1][0] and "не отвечает" in asked[-1][0] and asked[-1][1:] == ("Отключить прокси", "Оставить")
+      and "ядр" not in asked[-1][0].lower(), asked[-1:])
+check("... agreed: the proxy is switched off, the connection goes on and the user is told",
+      disabled == [1] and started and "Прокси Windows отключён" in app13.status.cget("text"), (disabled, started, app13.status.cget("text")))
+vpn.ask_yes_no = lambda parent, text, yes="Да", no="Нет": asked.append((text, yes, no)) or False
+disabled.clear()
+started.clear()
+app13.state = "off"
+app13.proc = None
+app13.toggle()
+check("... refused: left alone, the connection still goes on, the user is warned",
+      not disabled and started and "не отвечает" in app13.status.cget("text") and "могут не открываться" in app13.status.cget("text"),
+      (disabled, started, app13.status.cget("text")))
+vpn.local_proxy_state = lambda: ("127.0.0.1:3067", True)
+asked.clear()
+started.clear()
+app13.state = "off"
+app13.proc = None
+app13.toggle()
+check("a working proxy of another program: no question, only a note that the browser uses it instead of the VPN",
+      not asked and started and "другая программа" in app13.status.cget("text"), (asked, app13.status.cget("text")))
+vpn.local_proxy_state = lambda: (None, False)
+asked.clear()
+started.clear()
+app13.state = "off"
+app13.proc = None
+app13.toggle()
+check("no system proxy: nothing is asked or said about it", not asked and started and "Windows" not in app13.status.cget("text"), app13.status.cget("text"))
+vpn.ask_yes_no, vpn.local_proxy_state, vpn.disable_system_proxy = real_asks
+vpn.ask_yes_no = lambda *a, **k: True
+app13.state = "off"
+app13.proc = None
+
+# 5c. the window never grows past the screen: the footer with «Лог» and «Настройки» stays reachable
+real_sh = app13.winfo_screenheight
+app13.winfo_screenheight = lambda: 960
+app13.toggle_settings(True)
+app13.update()
+foot_bottom = app13.foot.winfo_y() + app13.foot.winfo_height()
+check("small screen: with the settings open the server list gives way and the footer is inside the window",
+      int(app13.tree.cget("height")) < 6 and foot_bottom <= app13.winfo_height(), (app13.tree.cget("height"), foot_bottom, app13.winfo_height()))
+check("... and the window fits the screen", app13.winfo_height() <= 960, app13.winfo_height())
+app13.winfo_screenheight = lambda: 2000
+app13.toggle_settings(False)
+app13.toggle_settings(True)
+app13.update()
+check("tall screen: the list has its normal size again", int(app13.tree.cget("height")) == 6, app13.tree.cget("height"))
+app13.toggle_settings(False)
+app13.winfo_screenheight = real_sh
+
 # 6. advanced settings: validation, effect on the config, fallback, the window, the double click
 check("pro defaults are what the program always did",
       vpn.clean_pro(None)[0] == vpn.PRO_DEFAULTS and vpn.PRO_DEFAULTS["mixed_port"] == 2080 and vpn.PRO_DEFAULTS["tun_stack"] == "mixed")

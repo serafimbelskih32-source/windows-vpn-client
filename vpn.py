@@ -436,7 +436,7 @@ REFRESH_DEFAULT_H = 12  # when the provider does not send profile-update-interva
 def fetch(url: str, ua: str):
     """Returns (body, headers with lower-case names)."""
     req = urllib.request.Request(url, headers={"User-Agent": ua})
-    with urllib.request.urlopen(req, timeout=20) as r:
+    with updater.urlopen(req, timeout=20) as r:
         body = r.read(MAX_SUB_BYTES + 1)
         if len(body) > MAX_SUB_BYTES:
             raise ValueError("ответ слишком большой для подписки")
@@ -512,6 +512,10 @@ def merge_outs(groups):
 
 
 RELEASES_URL = f"https://github.com/{updater.REPO}/releases/latest"
+MSG_DEAD_PROXY = ("В Windows включён прокси {addr}, но он не отвечает. Скорее всего, он остался от другой программы "
+                  "(например, VPN-клиента), которую закрыли или после перезагрузки компьютера.\n\nИз-за него браузер и многие "
+                  "программы не открывают сайты, даже когда VPN включён.\n\nОтключить этот прокси? Если он снова понадобится, "
+                  "программа, которая его создала, включит его сама.")
 MSG_NO_CORE = ("Не хватает файла, без которого VPN не работает.\n\nТак бывает, когда антивирус удаляет его по ошибке. "
                "Что сделать:\n1. Добавь программу в исключения антивируса.\n2. Скачай программу заново и запусти её.\n\n"
                "Если не получится, напиши об этом на странице проекта на GitHub.")
@@ -1233,6 +1237,62 @@ def drop_downloaded_rules():
                 os.remove(os.path.join(RULES_DIR, name))
     except OSError:
         pass
+
+
+def system_proxy():
+    """Windows: (switched on?, 'host:port' text) of the proxy in 'Internet Settings' that browsers and many programs
+    obey. Elsewhere (False, "")."""
+    if not IS_WIN:
+        return False, ""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings") as k:
+            on = int(winreg.QueryValueEx(k, "ProxyEnable")[0]) == 1
+            return on, (str(winreg.QueryValueEx(k, "ProxyServer")[0]) if on else "")
+    except (OSError, ValueError):
+        return False, ""
+
+
+def proxy_endpoints(server):
+    """'127.0.0.1:3067' or 'http=a:1;https=b:2' -> [('127.0.0.1', 3067)]"""
+    out = []
+    for part in str(server).split(";"):
+        part = re.sub(r"^[A-Za-z]+://", "", part.split("=", 1)[-1].strip())
+        host, _, port = part.rpartition(":")
+        if host and port.isdigit():
+            out.append((host.strip("[]"), int(port)))
+    return out
+
+
+def local_proxy_state():
+    """(address, alive) of the system proxy if it sits on this computer, else (None, False). A proxy that nobody
+    listens on is what a closed or crashed VPN client leaves behind: browsers then show no internet at all."""
+    on, server = system_proxy()
+    if not on:
+        return None, False
+    for host, port in proxy_endpoints(server):
+        if host in ("127.0.0.1", "localhost", "::1"):
+            try:
+                socket.create_connection((host, port), 0.7).close()
+                return f"{host}:{port}", True
+            except OSError:
+                return f"{host}:{port}", False
+    return None, False
+
+
+def disable_system_proxy():
+    """Switch the Windows proxy off and tell running programs. True if it worked."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", 0,
+                            winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+        wininet = ctypes.windll.wininet
+        wininet.InternetSetOptionW(None, 39, None, 0)  # INTERNET_OPTION_SETTINGS_CHANGED
+        wininet.InternetSetOptionW(None, 37, None, 0)  # INTERNET_OPTION_REFRESH
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def pick_port(preferred):
@@ -2042,8 +2102,16 @@ class App(tk.Tk):
         """Resize to what the content needs, keeping the width (geometry("") would also reset the width to the widest
         child's natural request: the 80-character text fields make that wider than the window)."""
         self.update_idletasks()
+        avail = self.winfo_screenheight() - P(120)  # the taskbar and the title bar take the rest
+        rows = 6
+        self.tree.configure(height=rows)
+        self.update_idletasks()
+        while self.winfo_reqheight() > avail and rows > 2:  # too tall for the screen: the server list gives way, not the footer
+            rows -= 1
+            self.tree.configure(height=rows)
+            self.update_idletasks()
         w = self.winfo_width()
-        self.geometry(f"{w if w > 100 else P(480)}x{max(self.winfo_reqheight(), P(760))}")
+        self.geometry(f"{w if w > 100 else P(480)}x{min(max(self.winfo_reqheight(), P(760)), max(avail, P(520)))}")
 
     def toggle_settings(self, force=None):
         self.set_open = (not self.set_open) if force is None else force
@@ -2653,6 +2721,17 @@ class App(tk.Tk):
         if karing_running() and not ask_yes_no(self, "Запущен другой VPN-клиент (Karing / v2rayN / Hiddify / NekoRay).\n"
                      "Два VPN сразу конфликтуют. Отключи его и нажми «Да», либо «Нет» для отмены."):
             return
+        proxy_note = ""
+        addr, alive = local_proxy_state()
+        if addr and not alive:
+            if ask_yes_no(self, MSG_DEAD_PROXY.format(addr=addr), "Отключить прокси", "Оставить"):
+                proxy_note = "Прокси Windows отключён: он не отвечал." if disable_system_proxy() else ""
+                if not proxy_note:
+                    self.say("Не получилось отключить прокси. Отключи его в настройках Windows: «Сеть и Интернет» → «Прокси».", err=True)
+            else:
+                proxy_note = f"Прокси Windows {addr} не отвечает, сайты в браузере могут не открываться."
+        elif addr:
+            proxy_note = f"В Windows включён прокси {addr} (другая программа): браузер идёт через него, а не через этот VPN."
         if not os.path.isfile(CORE):
             self.say("Не хватает файла для работы VPN. Скорее всего, его удалил антивирус.", err=True)
             if Dialog(self, MSG_NO_CORE, ["Скачать заново", "Закрыть"], "error", 0, 1).result == 0:
@@ -2679,7 +2758,7 @@ class App(tk.Tk):
         self.active = self.sel_name()
         self.state = "connecting"
         self.t_conn = time.time()
-        self.say(" ".join(t for t in (note, "" if IS_WIN else "Подтверди права администратора в окне системы.") if t))
+        self.say(" ".join(t for t in (note, proxy_note, "" if IS_WIN else "Подтверди права администратора в окне системы.") if t))
         self.refresh_power()
 
     def prepare_config(self):

@@ -138,6 +138,54 @@ vpn.drop_downloaded_rules()
 check("a damaged downloaded rule list is removed, other files stay", sorted(os.listdir(vpn.RULES_DIR)) == ["keep.txt"], os.listdir(vpn.RULES_DIR))
 check("... and the bundled lists take over", vpn.rule_path("geosite-ru") is None or vpn.rule_path("geosite-ru").startswith(vpn.CORE_DIR))
 
+# ---------- a proxy left behind by another program ----------
+check("proxy text: one address, per-scheme list, with scheme, junk",
+      vpn.proxy_endpoints("127.0.0.1:3067") == [("127.0.0.1", 3067)]
+      and vpn.proxy_endpoints("http=127.0.0.1:1;https=proxy.example:8080") == [("127.0.0.1", 1), ("proxy.example", 8080)]
+      and vpn.proxy_endpoints("http://localhost:8118") == [("localhost", 8118)] and vpn.proxy_endpoints("") == []
+      and vpn.proxy_endpoints("nonsense") == [] and vpn.proxy_endpoints("host:abc") == [])
+import socket as _sock  # noqa: E402
+live = _sock.socket()
+live.bind(("127.0.0.1", 0))
+live.listen(5)
+live_port = live.getsockname()[1]
+dead = _sock.socket()
+dead.bind(("127.0.0.1", 0))
+dead_port = dead.getsockname()[1]
+dead.close()  # a port that nobody listens on
+real_sp = vpn.system_proxy
+for label, state, want in (("dead loopback proxy", (True, f"127.0.0.1:{dead_port}"), (f"127.0.0.1:{dead_port}", False)),
+                           ("live loopback proxy", (True, f"127.0.0.1:{live_port}"), (f"127.0.0.1:{live_port}", True)),
+                           ("proxy on another machine is not judged", (True, "proxy.corp.example:8080"), (None, False)),
+                           ("proxy switched off", (False, ""), (None, False))):
+    vpn.system_proxy = lambda s=state: s
+    check(f"system proxy: {label}", vpn.local_proxy_state() == want, vpn.local_proxy_state())
+vpn.system_proxy = real_sp
+real_gp = vpn.updater.urllib.request.getproxies
+vpn.updater.urllib.request.getproxies = lambda: {"http": f"http://127.0.0.1:{dead_port}", "https": f"http://127.0.0.1:{live_port}",
+                                                 "ftp": "http://far.example:3128"}
+got_px = vpn.updater.usable_proxies()
+vpn.updater.urllib.request.getproxies = real_gp
+check("our requests drop a dead local proxy and keep a live one and a remote one",
+      "http" not in got_px and got_px.get("https", "").endswith(str(live_port)) and "ftp" in got_px, got_px)
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+class Hello(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"hi")
+    def log_message(self, *a): pass
+srv_ = ThreadingHTTPServer(("127.0.0.1", 0), Hello)
+threading_ = __import__("threading")
+threading_.Thread(target=srv_.serve_forever, daemon=True).start()
+vpn.updater.urllib.request.getproxies = lambda: {"http": f"http://127.0.0.1:{dead_port}"}
+try:
+    body_ = vpn.fetch(f"http://127.0.0.1:{srv_.server_address[1]}/", "ua")[0]
+except Exception as e:  # noqa: BLE001
+    body_ = repr(e)
+vpn.updater.urllib.request.getproxies = real_gp
+srv_.shutdown()
+live.close()
+check("a subscription is fetched even though Windows points at a dead proxy", body_ == "hi", body_)
+
 # ---------- advanced settings ----------
 got, errs = vpn.clean_pro({"mixed_port": "8080", "auto_interval": 5, "dns_remote": "dns.google", "dns_local": "9.9.9.9",
                            "auto_url": "http://probe.example/ping", "test_secs": " 7 ", "log_level": "warn", "tun_stack": "system",
@@ -162,14 +210,14 @@ class Resp:
     def read(self, k=-1): return b"a" * min(self.n, k if k >= 0 else self.n)
     def __enter__(self): return self
     def __exit__(self, *a): return False
-real_open = vpn.urllib.request.urlopen
-vpn.urllib.request.urlopen = lambda req, timeout=0: Resp(vpn.MAX_SUB_BYTES * 2)
+real_open = vpn.updater.urlopen
+vpn.updater.urlopen = lambda req, timeout=0: Resp(vpn.MAX_SUB_BYTES * 2)
 try:
     vpn.fetch("https://sub.example/secret-key-123", "ua")
     capped = False
 except ValueError:
     capped = True
-vpn.urllib.request.urlopen = real_open
+vpn.updater.urlopen = real_open
 check("an oversized subscription answer is refused", capped)
 outs_, info_, ua_, errs = vpn.fetch_source("https://sub.example/secret-key-123?token=abc", None)
 check("an unreachable subscription's message does not show its secret path", errs and all("secret" not in e and "token" not in e for e in errs), errs)

@@ -10,6 +10,7 @@ import os
 import platform
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -50,10 +51,31 @@ def _check_url(url):
         raise ValueError(f"адрес не из списка разрешённых: {u.hostname}")
 
 
+def usable_proxies():
+    """The system's proxy settings minus a proxy on this very computer that nobody listens on. A VPN client that was
+    closed (or the computer restarted) often leaves its proxy switched on in Windows; every request that obeys it then
+    fails, including ours, with "connection refused"."""
+    out = {}
+    for scheme, url in urllib.request.getproxies().items():
+        u = urlsplit(url if "://" in url else "http://" + url)
+        if u.hostname in ("127.0.0.1", "localhost", "::1") and u.port:
+            try:
+                socket.create_connection((u.hostname, u.port), 0.7).close()
+            except OSError:
+                continue
+        out[scheme] = url
+    return out
+
+
+def urlopen(req, timeout=30):
+    """urllib's urlopen with usable_proxies() instead of whatever the system says."""
+    return urllib.request.build_opener(urllib.request.ProxyHandler(usable_proxies())).open(req, timeout=timeout)
+
+
 def _open(url, timeout=30):
     _check_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/vnd.github+json, */*"})
-    r = urllib.request.urlopen(req, timeout=timeout)
+    r = urlopen(req, timeout=timeout)
     try:
         _check_url(r.geturl())  # a redirect must not lead away from GitHub either
     except ValueError:
