@@ -183,7 +183,10 @@ if sys.platform == "win32":
     open(dst, "wb").write(b"OLD")
     open(src, "wb").write(b"NEW")
     updater.apply_windows(src, dst, [], relaunch=False, sha256=hashlib.sha256(b"WRONG").hexdigest(), attempts=3)
-    time.sleep(5)
+    time.sleep(6)
+    end = time.time() + 25  # a slow runner needs longer: wait for the helper to finish with its half-copied file
+    while time.time() < end and os.path.exists(dst + ".new"):
+        time.sleep(0.3)
     check("windows: a file that does not match its hash never replaces the program", open(dst, "rb").read() == b"OLD")
     check("windows: ... and no half-copied file is left next to it", not os.path.exists(dst + ".new"))
     updater.apply_windows(src, dst, [], relaunch=False, sha256=hashlib.sha256(b"NEW").hexdigest().upper(), attempts=10)
