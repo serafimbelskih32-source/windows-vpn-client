@@ -140,6 +140,65 @@ else:
     check("posix: binary replaced and executable", open(dst, "rb").read() == b"NEW" and os.access(dst, os.X_OK))
     check("posix: staged copy removed", not os.path.exists(src))
 
+# ---------- several copies of the program, one install at a time, damaged files ----------
+dd = tempfile.mkdtemp(prefix="fimadata_")
+a1, a2 = updater.update_dir(dd, os.path.join(dd, "Downloads", "FimaVPN.exe")), updater.update_dir(dd, os.path.join(dd, "release", "FimaVPN.exe"))
+check("two copies of the program stage their updates in different folders", a1 != a2 and os.path.dirname(a1) == os.path.dirname(a2))
+check("one copy always gets the same folder", a1 == updater.update_dir(dd, os.path.join(dd, "Downloads", "FimaVPN.exe")))
+check("... whatever the case of its path on Windows' case-insensitive disks",
+      sys.platform != "win32" or a1 == updater.update_dir(dd, os.path.join(dd, "DOWNLOADS", "fimavpn.exe")))
+
+claim_dir = tempfile.mkdtemp(prefix="fimaclaim_")
+check("the first install may start", updater._claim(claim_dir) is True)
+check("a second one while it is on its way may not", updater._claim(claim_dir) is False)
+old = time.time() - updater.LOCK_TTL - 5
+os.utime(updater._lock_path(claim_dir), (old, old))
+check("an install that never finished does not block forever", updater._claim(claim_dir) is True)
+
+cl = tempfile.mkdtemp(prefix="fimaclean_")
+json.dump({"version": "1.2.2"}, open(os.path.join(cl, "staged.json"), "w"))
+updater.cleanup(cl, "1.2.2")
+check("cleanup removes an update that is installed already", not os.path.exists(cl))
+cl = tempfile.mkdtemp(prefix="fimaclean_")
+json.dump({"version": "1.2.3"}, open(os.path.join(cl, "staged.json"), "w"))
+updater.cleanup(cl, "1.2.2")
+check("... and keeps one that is newer than the running program", os.path.exists(cl))
+cl2 = tempfile.mkdtemp(prefix="fimaclean_")
+json.dump({"version": "1.0.0"}, open(os.path.join(cl2, "staged.json"), "w"))
+updater._claim(cl2)
+updater.cleanup(cl2, "1.2.2")
+check("... and leaves an install under way alone", os.path.exists(cl2))
+
+if sys.platform == "win32":
+    work = tempfile.mkdtemp(prefix="fimaswap_")
+    dst, src = os.path.join(work, "FimaVPN.exe"), os.path.join(work, "new.exe")
+    open(dst, "wb").write(b"OLD")
+    open(src, "wb").write(b"NEW")
+    updater.apply_windows(src, dst, [], relaunch=False, sha256=hashlib.sha256(b"WRONG").hexdigest(), attempts=3)
+    time.sleep(5)
+    check("windows: a file that does not match its hash never replaces the program", open(dst, "rb").read() == b"OLD")
+    check("windows: ... and no half-copied file is left next to it", not os.path.exists(dst + ".new"))
+    updater.apply_windows(src, dst, [], relaunch=False, sha256=hashlib.sha256(b"NEW").hexdigest().upper(), attempts=10)
+    end = time.time() + 20
+    while time.time() < end and open(dst, "rb").read() != b"NEW":
+        time.sleep(0.3)
+    check("windows: a file with the right hash replaces it", open(dst, "rb").read() == b"NEW")
+    check("windows: ... and the work file is gone", not os.path.exists(dst + ".new") and not os.path.exists(src))
+
+    # two installs for the same update: only the first starts a swap
+    folder = tempfile.mkdtemp(prefix="fimatwice_")
+    dst2, src2 = os.path.join(folder, "FimaVPN.exe"), os.path.join(folder, "new.exe")
+    open(dst2, "wb").write(b"OLD")
+    open(src2, "wb").write(b"NEW")
+    inf = {"version": "9.9.9", "name": "FimaVPN.exe", "path": src2, "sha256": hashlib.sha256(b"NEW").hexdigest()}
+    first = updater.apply_staged(dict(inf), relaunch=False, exe=dst2, pids=[])
+    second = updater.apply_staged(dict(inf), relaunch=False, exe=dst2, pids=[])
+    check("a second install of the same update is refused", first is True and second is False, (first, second))
+    end = time.time() + 20
+    while time.time() < end and open(dst2, "rb").read() != b"NEW":
+        time.sleep(0.3)
+    check("... and the first one still completes", open(dst2, "rb").read() == b"NEW")
+
 # apply_staged does nothing when not packaged
 check("apply_staged is a no-op from source", updater.apply_staged({"path": "x"}, False) is False)
 

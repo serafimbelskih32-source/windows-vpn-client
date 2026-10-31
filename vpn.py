@@ -50,7 +50,7 @@ def data_dir():
 DATA = data_dir()
 STOPFILE = os.path.join(DATA, "stop")  # Linux/macOS: the root supervisor stops the core when this file appears
 INSTANCE_FILE = os.path.join(DATA, "instance.port")  # loopback port of the running copy, so a 2nd launch can reach it
-UPDATE_DIR = os.path.join(DATA, "update")  # a downloaded, verified update waits here for the next start
+UPDATE_DIR = updater.update_dir(DATA)  # a downloaded, verified update waits here for the next start (one folder per program file)
 SETTINGS = os.path.join(DATA, "settings.json")
 RUNCFG = os.path.join(DATA, "run.json")
 LOGFILE = os.path.join(DATA, "sing-box.log")
@@ -1216,6 +1216,7 @@ class App(tk.Tk):
         self.uiq = queue.Queue()  # callables from worker threads, run by pump() on the Tk thread
         self.flagimgs = FlagImages(self)
         self.quitting = False
+        self.installing = False  # an update install has been handed to the helper
         self.tray, self.tray_ok = None, False
         if not os.environ.get("FIMA_NO_TRAY"):  # tests and screenshots must not put icons on the real desktop
             self.tray = tray.Tray(os.path.join(BASE, "icon.png"), self._ui, self.show_window, self.toggle_from_tray,
@@ -1467,14 +1468,19 @@ class App(tk.Tk):
                                                          if self.cfg.get("auto_update") else "Нажми «Установить»."))
 
     def install_now(self):
+        if self.installing:
+            return  # a second click while the first install is on its way
         if self.state != "off" and not ask_yes_no(self, "VPN отключится на время обновления. Продолжить?"):
             return
+        self.installing = True
         self.save()
         self.test_stop.set()
         self.stop()
         if updater.apply_staged(self.pending, relaunch=True):
-            self.destroy()
-            sys.exit(0)
+            self.quitting = True
+            self.destroy()  # the loop ends and the process with it; the helper swaps the files and starts the new copy
+            return
+        self.installing = False
         self.say("Не удалось установить обновление. Скачай новую версию с GitHub вручную.", err=True)
 
     # ----- small helpers -----
@@ -1878,7 +1884,8 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         finally:
-            self._pump_id = self.after(50, self.pump)
+            if not self.quitting:  # after destroy() there is no window left to schedule on
+                self._pump_id = self.after(50, self.pump)
 
     def on_select(self, e=None):
         """Remember the server the user picked. Selections the app makes itself (self._pick) do not count,
@@ -2352,6 +2359,14 @@ def signal_running_instance():
         return False
 
 
+def swap_selftest(new_exe):
+    """`--swap-selftest <file>` in a packaged build: copy <file> over this program the way an update does and let the
+    helper start it. CI checks that the started copy runs (a packaged program that cannot restart itself is the
+    kind of bug unit tests cannot see)."""
+    info = {"version": "0", "name": "x", "path": os.path.abspath(new_exe), "sha256": updater.sha256_file(new_exe), "tries": 0}
+    return 0 if updater.apply_staged(info, relaunch=True) else 1
+
+
 def apply_pending_update():
     """At start: if automatic updates are on and a verified newer version is waiting, install it and restart."""
     try:
@@ -2374,6 +2389,12 @@ if __name__ == "__main__":
             pass
     sys.excepthook = log_crash
     threading.excepthook = lambda a: log_crash(a.exc_type, a.exc_value, a.exc_traceback)
+    if "--swap-selftest" in sys.argv:  # packaged build, CI: replace this very file the way an update does
+        sys.exit(swap_selftest(sys.argv[sys.argv.index("--swap-selftest") + 1]))
+    if os.environ.get("FIMA_SWAP_MARKER") and getattr(sys, "frozen", False):  # ...and this is the copy that got started
+        with open(os.environ["FIMA_SWAP_MARKER"], "w") as _f:
+            _f.write(f"started {sys.executable}")
+        sys.exit(0)
     if not any(a in sys.argv for a in ("--selftest", "--tray-selftest")) and already_running():
         if not signal_running_instance():  # it did not answer: say so, in the app's style
             _r = tk.Tk()
@@ -2389,6 +2410,8 @@ if __name__ == "__main__":
     if "--tray-selftest" in sys.argv:
         print(tray.selftest())
         sys.exit(0)
+    if getattr(sys, "frozen", False):
+        updater.cleanup(UPDATE_DIR)  # what a finished update left behind
     if apply_pending_update():
         sys.exit(0)  # the helper swaps the files after we exit and starts the new version
     App().mainloop()

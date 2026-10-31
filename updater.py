@@ -106,6 +106,14 @@ def _write_json(path, obj):
     os.replace(tmp, path)
 
 
+def update_dir(data_dir, exe=None):
+    """Where this copy of the program keeps its downloaded update. One folder per program file: two copies of the
+    program (say one in Downloads and one on the desktop) share the settings folder, and with a single shared update
+    folder the first to install took the file and the second restarted itself without being updated."""
+    exe = os.path.abspath(exe or sys.executable)
+    return os.path.join(data_dir, "update", hashlib.sha1(exe.lower().encode("utf-8", "replace")).hexdigest()[:10])
+
+
 def stage(upd, dest_dir, progress=None):
     """Download the asset, verify it against SHA256SUMS.txt and remember it for the next start.
     Raises ValueError on any mismatch; nothing is left staged in that case."""
@@ -158,6 +166,46 @@ def discard(dest_dir):
     shutil.rmtree(dest_dir, ignore_errors=True)
 
 
+LOCK_TTL = 120  # seconds a started install counts as still running
+
+
+def _lock_path(folder):
+    return os.path.join(folder, "applying.lock")
+
+
+def _claim(folder):
+    """True if this call may start the install. A second click or a second start while the first install is still
+    on its way must not start a second swap (that is how one update used to open two programs)."""
+    lock = _lock_path(folder)
+    try:
+        if time.time() - os.path.getmtime(lock) < LOCK_TTL:
+            return False
+        os.remove(lock)  # an earlier install that never finished
+    except OSError:
+        pass
+    try:
+        os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        return True
+    except OSError:
+        return False
+
+
+def cleanup(dest_dir, current=VERSION):
+    """Remove what an installed (or no longer newer) update leaves behind. Never while an install is under way."""
+    try:
+        if time.time() - os.path.getmtime(_lock_path(dest_dir)) < LOCK_TTL:
+            return
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(dest_dir, "staged.json"), encoding="utf-8") as f:
+            newer = parse_version(json.load(f)["version"]) > parse_version(current)
+    except Exception:  # noqa: BLE001
+        newer = False
+    if not newer:
+        discard(dest_dir)
+
+
 # ----- swapping the new program in -----
 # A PyInstaller one-file program passes its unpacked folder to everything it starts through these variables.
 _PYI_VARS = ("_MEIPASS2", "_PYI_APPLICATION_HOME_DIR", "_PYI_ARCHIVE_FILE", "_PYI_PARENT_PROCESS_LEVEL", "_PYI_SPLASH_IPC")
@@ -176,14 +224,21 @@ def _ps_quote(p):
     return "'" + p.replace("'", "''") + "'"
 
 
-def apply_windows(src, dst, pids, relaunch):
-    """Detached PowerShell: wait until the old program exits (its exe is locked until then), copy, restart."""
+def apply_windows(src, dst, pids, relaunch, sha256=None, attempts=60):
+    """Detached PowerShell: wait until the old program exits (its exe is locked until then), put the new file next to
+    the old one, check it against the expected hash, replace the old one in a single move, restart.
+    A damaged copy never replaces a working program; if nothing could be replaced the old program is started again."""
     wait = f"Wait-Process -Id {','.join(str(p) for p in pids)} -ErrorAction SilentlyContinue; " if pids else ""
+    tmp = dst + ".new"
+    verify = (f"if ((Get-FileHash -LiteralPath {_ps_quote(tmp)} -Algorithm SHA256).Hash -ne {_ps_quote(sha256)}) "
+              "{ throw 'hash' }; " if sha256 else "")
     script = (wait +
-              "for ($i = 0; $i -lt 60; $i++) { try { "
-              f"Copy-Item -LiteralPath {_ps_quote(src)} -Destination {_ps_quote(dst)} -Force -ErrorAction Stop; "
+              f"for ($i = 0; $i -lt {int(attempts)}; $i++) {{ try {{ "
+              f"Copy-Item -LiteralPath {_ps_quote(src)} -Destination {_ps_quote(tmp)} -Force -ErrorAction Stop; " + verify +
+              f"Move-Item -LiteralPath {_ps_quote(tmp)} -Destination {_ps_quote(dst)} -Force -ErrorAction Stop; "
               f"Remove-Item -LiteralPath {_ps_quote(src)} -Force -ErrorAction SilentlyContinue; break "
-              "} catch { Start-Sleep -Milliseconds 500 } }; " +
+              "} catch { Start-Sleep -Milliseconds 500 } }; "
+              f"Remove-Item -LiteralPath {_ps_quote(tmp)} -Force -ErrorAction SilentlyContinue; " +
               (f"Start-Process -FilePath {_ps_quote(dst)}" if relaunch else ""))
     # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW. (DETACHED_PROCESS would make powershell exit silently.)
     flags = 0x00000200 | 0x08000000
@@ -227,12 +282,15 @@ def apply_staged(info, relaunch, exe=None, pids=None):
     exe = exe or sys.executable
     if pids is None:
         pids = [os.getpid()] + ([os.getppid()] if sys.platform == "win32" else [])  # onefile: bootloader holds the exe
+    folder = os.path.dirname(info["path"])
+    if not _claim(folder):
+        return False  # another install of this update is already on its way
     try:
         info["tries"] = info.get("tries", 0) + 1
         if info.get("_json"):
             _write_json(info["_json"], {k: v for k, v in info.items() if k != "_json"})
         if sys.platform == "win32":
-            apply_windows(info["path"], exe, pids, relaunch)
+            apply_windows(info["path"], exe, pids, relaunch, info.get("sha256"))
         elif sys.platform == "darwin":
             bundle = os.path.abspath(os.path.join(os.path.dirname(exe), "..", ".."))
             apply_macos(info["path"], bundle, relaunch, pids)
@@ -240,4 +298,8 @@ def apply_staged(info, relaunch, exe=None, pids=None):
             apply_linux(info["path"], exe, relaunch)
         return True
     except Exception:
+        try:
+            os.remove(_lock_path(folder))  # nothing was started: the next try may go ahead
+        except OSError:
+            pass
         return False

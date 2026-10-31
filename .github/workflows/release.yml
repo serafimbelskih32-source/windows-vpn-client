@@ -107,12 +107,23 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then
             xvfb-run -a "dist/${{ matrix.asset }}" --selftest < tests/sample_links.txt
             xvfb-run -a "dist/${{ matrix.asset }}" --tray-selftest | tee /dev/stderr | grep -q "^ok"
+            # an update replaces the running program with another file and starts it again: prove that works in the built binary
+            T=$(mktemp -d); cp "dist/${{ matrix.asset }}" "$T/app"; cp "dist/${{ matrix.asset }}" "$T/new"
+            FIMA_SWAP_MARKER="$T/marker" xvfb-run -a "$T/app" --swap-selftest "$T/new"
+            for i in $(seq 1 30); do [ -f "$T/marker" ] && break; sleep 1; done
+            test -f "$T/marker" && cat "$T/marker"
           elif [ "$RUNNER_OS" = "macOS" ]; then
             dist/FimaVPN.app/Contents/MacOS/FimaVPN --selftest < tests/sample_links.txt
             dist/FimaVPN.app/Contents/MacOS/FimaVPN --tray-selftest | tee /dev/stderr | grep -q "^ok"
             find dist/FimaVPN.app -name sing-box -type f -exec ls -la {} \;
           else
             ls -la "dist/${{ matrix.asset }}"
+            # an update replaces the running program with another file and starts it again: prove that works in the built exe
+            T=$(mktemp -d); cp "dist/${{ matrix.asset }}" "$T/app.exe"; cp "dist/${{ matrix.asset }}" "$T/new.exe"
+            export FIMA_SWAP_MARKER="$(cygpath -w "$T/marker.txt")"
+            "$T/app.exe" --swap-selftest "$(cygpath -w "$T/new.exe")"
+            for i in $(seq 1 40); do [ -f "$T/marker.txt" ] && break; sleep 1; done
+            test -f "$T/marker.txt" && cat "$T/marker.txt"
           fi
 
       - uses: actions/upload-artifact@v4
