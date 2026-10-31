@@ -1078,8 +1078,11 @@ app13.work_area = lambda: (0, 2000)
 app13.toggle_settings(False); app13.toggle_log(False)
 app13.toggle_settings(True)
 app13.update()
-check("tall screen: the list has its normal size again and no bar is shown", int(app13.tree.cget("height")) == 6 and not app13._bar_on,
-      (app13.tree.cget("height"), app13._bar_on))
+# (a real window cannot be taller than the real screen, and a CI runner's screen is small: so the bar is judged by what
+# the window could really get, not by the pretended 2000 px)
+check("tall screen: the list has its normal size again and the bar is shown only if the content really does not fit",
+      int(app13.tree.cget("height")) == 6 and app13._bar_on == (app13.body.winfo_reqheight() > app13.canvas.winfo_height() + 1),
+      (app13.tree.cget("height"), app13._bar_on, app13.body.winfo_reqheight(), app13.canvas.winfo_height()))
 app13.toggle_settings(False)
 # a window dragged down so that its lower part is off the screen is pulled back when it grows
 app13.work_area = lambda: (0, 900)
