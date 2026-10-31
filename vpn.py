@@ -20,6 +20,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import tkinter as tk
 from tkinter import font as tkfont
+import urllib.error
 import urllib.request
 from tkinter import messagebox, ttk
 from urllib.parse import parse_qs, unquote, urlparse, urlsplit
@@ -3211,10 +3212,16 @@ def net_selftest():
         print("plain python https: ok")
     except Exception as e:  # noqa: BLE001
         print("plain python https: FAILS (", str(e)[:100], ") - the reason a fix is needed on this system")
+    def answered(fn):  # any reply, even "403 rate limit" (CI runners share addresses), proves the https connection worked
+        try:
+            fn()
+        except urllib.error.HTTPError:
+            pass
+
     checks = (
-        ("fetch() like a subscription", lambda: fetch("https://api.github.com/zen", "v2rayN/7.0")[0]),
+        ("fetch() like a subscription", lambda: answered(lambda: fetch("https://api.github.com/zen", "v2rayN/7.0"))),
         ("http.client like the ping probe", lambda: http.client.HTTPSConnection("www.gstatic.com", timeout=15).request("GET", "/generate_204")),
-        ("DNS-over-HTTPS fallback", lambda: updater.get_resolved("https://api.github.com/zen", {"User-Agent": "v2rayN/7.0"}, 15)[0]),
+        ("DNS-over-HTTPS fallback", lambda: answered(lambda: updater.get_resolved("https://api.github.com/zen", {"User-Agent": "v2rayN/7.0"}, 15))),
     )
     for name, fn in checks:
         try:
