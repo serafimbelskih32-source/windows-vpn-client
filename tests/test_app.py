@@ -238,6 +238,25 @@ app.refresh_due()
 pump(app, lambda: False, 1)
 check("no refresh during a speed test", STATE["hits"] == before)
 app.testing = False
+
+# what a user really pastes: an "open in the app" link, an address in quotes inside a sentence, an address without a scheme
+STATE["s1_fail"] = False
+STATE["s1_nodes"] = ["Германия", "Финляндия", "Нидерланды"]
+from urllib.parse import quote  # noqa: E402
+prev_src = app.src.get("1.0", "end").strip()
+app.src.delete("1.0", "end")
+app.src.insert("1.0", f"sing-box://import-remote-profile?url={quote(S1, safe='')}#Моя подписка\nВот вторая: \"{S2}\", держи.\n")
+app.load()
+pump(app, lambda: not app.loading and S1 in app.subs and S2 in app.subs, 6)
+box = app.src.get("1.0", "end").strip().splitlines()
+check("a deep link and an address in a sentence are tidied in the box (and saved so)", box == [S1, S2] and app.cfg["sources"] == f"{S1}\n{S2}", (box, app.cfg["sources"]))
+check("... and both subscriptions load", len(app.outs) >= 4, len(app.outs))
+STATE["s1_nodes"] = ["Германия", "Финляндия", "Нидерланды"]  # back to what the rest of the suite expects
+STATE["s1_fail"] = True
+app.src.delete("1.0", "end")
+app.src.insert("1.0", prev_src)
+app.load()
+pump(app, lambda: not app.loading and len(app.outs) == 6, 6)
 app.destroy()
 
 STATE["s1_fail"] = True  # provider unreachable at the next start: cached list must still show instantly

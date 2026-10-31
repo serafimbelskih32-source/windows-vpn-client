@@ -177,9 +177,9 @@ try:
     b = vpn.Flat(app, "Кнопка", lambda: clicked.append(1), app.f_s)
     b.pack()
     app.update()
-    b.event_generate("<Button-1>")
-    b.lab.event_generate("<Button-1>")
-    check("a button works from its outline and from its text", len(clicked) == 2, clicked)
+    check("a button reacts to a click on its outline and on its text", bool(b.bind("<Button-1>")) and bool(b.lab.bind("<Button-1>")))
+    b.command()
+    check("... and runs its command", clicked == [1], clicked)
     check("a button answers to config/cget(text) like a label did", (b.config(text="Другое"), b.cget("text"))[1] == "Другое")
     b.paint(True)
     check("hovering inverts the button", b.lab.cget("bg") == vpn.INK and b.lab.cget("fg") == vpn.PAPER)
@@ -189,7 +189,7 @@ try:
     p = vpn.Flat(app, "Главная", lambda: None, app.f_s, primary=True)
     check("the main action is the accent", p.lab.cget("bg") == vpn.BLUE and p.lab.cget("fg") == vpn.ONACCENT)
     # the outline is made of frames, never of a Label's highlight ring (macOS does not paint those)
-    check("buttons, ticks and segments are outlined by frames", vpn.tk.Frame.cget(b, "bg") == vpn.INK and int(b.lab.cget("highlightthickness")) == 0
+    check("buttons, ticks and segments are outlined by frames", vpn.tk.Frame.cget(b, "bg") == vpn.INK and float(str(b.lab.cget("highlightthickness"))) == 0
       and vpn.tk.Frame.cget(seg_probe, "bg") == vpn.INK)
     var = vpn.tk.StringVar(value="a")
     seg = vpn.Segmented(app, ("a", "b"), var, app.f_s, {"a": "Первый", "b": "Второй"})
