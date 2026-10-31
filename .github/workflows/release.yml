@@ -10,7 +10,7 @@ permissions:
 
 env:
   SINGBOX_VERSION: "1.13.14"
-  XRAY_VERSION: "v26.10.29"
+  XRAY_VERSION: "v26.10.31"
 
 jobs:
   build:
