@@ -1,156 +1,166 @@
+<p align="center"><b>English</b> &nbsp;·&nbsp; <a href="README.ru.md">Русский</a></p>
+
 <p align="center">
-  <img src="docs/banner.png" alt="VPN-клиент для Windows, Linux и macOS" width="100%">
+  <img src="docs/banner-en.png" alt="VPN client for Windows, Linux and macOS" width="100%">
 </p>
 
 <p align="center">
-  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest"><img alt="Последняя версия" src="https://img.shields.io/github/v/release/serafimbelskih32-source/windows-vpn-client?style=flat-square&color=1E3CFF&label=%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F"></a>
-  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases"><img alt="Скачиваний" src="https://img.shields.io/github/downloads/serafimbelskih32-source/windows-vpn-client/total?style=flat-square&color=12151B&label=%D1%81%D0%BA%D0%B0%D1%87%D0%B0%D0%BD%D0%BE"></a>
-  <img alt="Системы" src="https://img.shields.io/badge/%D1%81%D0%B8%D1%81%D1%82%D0%B5%D0%BC%D1%8B-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-555C67?style=flat-square">
-  <a href="LICENSE"><img alt="Лицензия" src="https://img.shields.io/badge/%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F-MIT-555C67?style=flat-square"></a>
+  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/serafimbelskih32-source/windows-vpn-client?style=flat-square&color=1E3CFF&label=release"></a>
+  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/serafimbelskih32-source/windows-vpn-client/total?style=flat-square&color=12151B&label=downloads"></a>
+  <img alt="Systems" src="https://img.shields.io/badge/systems-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-555C67?style=flat-square">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-555C67?style=flat-square"></a>
 </p>
 
-<h3 align="center">Вставил подписку. Выбрал сервер. Нажал кнопку.</h3>
+<h3 align="center">Paste a subscription. Pick a server. Press the button.</h3>
 
 <p align="center">
-  Простой VPN-клиент для Windows, Linux и macOS. Бесплатный, с открытым кодом.<br>
-  Устанавливать ничего не нужно: скачал и запустил.
-</p>
-
-<p align="center">
-  <a href="https://serafimbelskih32-source.github.io/windows-vpn-client/"><b>Сайт</b></a> &nbsp;|&nbsp;
-  <a href="#скачать">Скачать</a> &nbsp;|&nbsp;
-  <a href="#как-начать">Как начать</a> &nbsp;|&nbsp;
-  <a href="#что-умеет">Что умеет</a> &nbsp;|&nbsp;
-  <a href="#автообновление">Автообновление</a> &nbsp;|&nbsp;
-  <a href="#частые-вопросы">Вопросы</a>
+  A simple VPN client for Windows, Linux and macOS. Free and open source.<br>
+  Nothing to install: download and run. Works in any country, in English or Russian.
 </p>
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Окно программы" width="290">
+  <a href="https://serafimbelskih32-source.github.io/windows-vpn-client/"><b>Website</b></a> &nbsp;|&nbsp;
+  <a href="#download">Download</a> &nbsp;|&nbsp;
+  <a href="#getting-started">Getting started</a> &nbsp;|&nbsp;
+  <a href="#features">Features</a> &nbsp;|&nbsp;
+  <a href="#auto-update">Auto-update</a> &nbsp;|&nbsp;
+  <a href="#faq">FAQ</a>
+</p>
+
+<p align="center">
+  <img src="docs/screenshot-en.png" alt="The program window" width="290">
   &nbsp;&nbsp;
-  <img src="docs/screenshot-minimal.png" alt="Тот же вид с выключенными флагами, пингом и скоростью" width="290">
+  <img src="docs/screenshot-en-dark.png" alt="The same window in the dark theme" width="290">
 </p>
-<p align="center"><sub>Полный вид и минималистичный. Всё лишнее отключается в «Настройках» внизу окна.</sub></p>
+<p align="center"><sub>Light and dark. Theme, accent colour, scale and font are in the advanced settings (double-click “Settings”).</sub></p>
 
-## Скачать
+## Download
 
 <p align="center">
-  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN.exe"><img src="docs/dl-windows.png" width="270" alt="Скачать для Windows 10 и 11"></a>
-  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN-linux-x86_64"><img src="docs/dl-linux-x86_64.png" width="270" alt="Скачать для Linux x86_64"></a>
-  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN-linux-arm64"><img src="docs/dl-linux-arm64.png" width="270" alt="Скачать для Linux ARM64"></a>
-  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN-macos-arm64.zip"><img src="docs/dl-macos-arm64.png" width="270" alt="Скачать для macOS Apple Silicon"></a>
-  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN-macos-x86_64.zip"><img src="docs/dl-macos-x86_64.png" width="270" alt="Скачать для macOS Intel"></a>
+  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN.exe"><img src="docs/dl-windows-en.png" width="270" alt="Download for Windows 10 and 11"></a>
+  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN-linux-x86_64"><img src="docs/dl-linux-x86_64-en.png" width="270" alt="Download for Linux x86_64"></a>
+  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN-linux-arm64"><img src="docs/dl-linux-arm64-en.png" width="270" alt="Download for Linux ARM64"></a>
+  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN-macos-arm64.zip"><img src="docs/dl-macos-arm64-en.png" width="270" alt="Download for macOS Apple Silicon"></a>
+  <a href="https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest/download/FimaVPN-macos-x86_64.zip"><img src="docs/dl-macos-x86_64-en.png" width="270" alt="Download for macOS Intel"></a>
 </p>
 
-| Система | Как запустить |
+| System | How to start it |
 |---|---|
-| **Windows** | Запусти `FimaVPN.exe` и разреши права администратора. |
-| **Linux** | `chmod +x FimaVPN-linux-x86_64`, потом `./FimaVPN-linux-x86_64`. Для ARM64 то же с другим файлом. |
-| **macOS** | Распакуй архив. При первом запуске нажми на программу правой кнопкой и выбери «Открыть». |
+| **Windows** | Run `FimaVPN.exe` and allow administrator rights. |
+| **Linux** | `chmod +x FimaVPN-linux-x86_64`, then `./FimaVPN-linux-x86_64`. For ARM64 the same with the other file. |
+| **macOS** | Unzip the archive. The first time, right-click the app and choose “Open”. |
 
-Все файлы и контрольные суммы: [страница релиза](https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest).
+All files and checksums: [the release page](https://github.com/serafimbelskih32-source/windows-vpn-client/releases/latest).
 
 > [!NOTE]
-> Программа **не продаёт и не выдаёт VPN**. Она подключается к серверам, ссылку на которые у тебя уже есть от провайдера или от твоего собственного сервера.
+> The program **does not sell or provide a VPN**. It connects to servers you already have a link for, from a VPN provider or your own server.
 
 > [!WARNING]
-> Версии для **Linux и macOS** новые: они собираются и проходят автоматические проверки на GitHub (окно открывается, ссылки разбираются, логика запуска и остановки ядра проверена на подставном ядре), но на настоящих компьютерах проверены меньше, чем версия для Windows. Если что-то не работает, [открой Issue](https://github.com/serafimbelskih32-source/windows-vpn-client/issues/new/choose) и приложи текст из раздела «Лог».
+> The **Linux and macOS** builds are new: they are built and checked automatically on GitHub (the window opens, links are parsed, the whole chain from the program to a server works), but they have not been run on real hardware by the author. If something looks or works wrong, open an [Issue](https://github.com/serafimbelskih32-source/windows-vpn-client/issues) with a screenshot and the text from “Log”.
 
-## Как начать
+## Getting started
 
-1. **Запусти программу.** Windows спросит права администратора, чтобы создать виртуальный сетевой адаптер: нажми «Да». На Linux и macOS пароль попросят позже, в момент подключения.
-2. **Вставь подписку.** Скопируй ссылку, которую выдал твой VPN-провайдер (обычно начинается с `https://`), и нажми «Вставить» в разделе «Подписки». Можно вставить сразу несколько ссылок или отдельные ключи (`vless://`, `vmess://`, `trojan://`, `ss://`, `hysteria2://`, `tuic://`), по одному в строке.
-3. **Выбери сервер.** «Быстрейший из списка» подберёт его сам и сам будет переключаться, если сервер станет хуже. Чтобы выбрать вручную, нажми «Тест скорости»: программа измерит пинг и скорость у серверов и покажет лучших вверху списка.
-4. **Нажми «Подключить».** Большая кнопка станет синей, рядом пойдёт таймер. Чтобы выключить VPN, нажми её ещё раз.
+0. **Choose a language and a country.** It is asked once, at the first start, and can be changed later with the “Country” button next to “Routing”. Sites of the chosen country (banks, government services, local services) open directly, without the VPN. The suggested country is detected for you; “None” sends everything through the VPN.
+1. **Run the program.** Windows asks for administrator rights to create a virtual network adapter: press “Yes”. On Linux and macOS only the VPN core asks for a password, when you press Connect.
+2. **Paste a subscription.** Copy the link your VPN provider gave you (it usually starts with `https://`) and press “Paste” in the “Subscriptions” section. You can paste several links, or single keys (`vless://`, `vmess://`, `trojan://`, `ss://`, `hysteria2://`, `tuic://`), one per line.
+3. **Choose a server.** “Fastest from the list” picks one itself and switches by itself if the server gets worse. To choose by hand, press “Speed test”: the program measures ping and speed and puts the best servers on top.
+4. **Press “Connect”.** The big button turns blue and a timer starts. To turn the VPN off, press it again.
 
-Подписки, настройки и выбранный сервер запоминаются, при следующем запуске вводить ничего не нужно.
+Subscriptions, settings and the chosen server are remembered; nothing to type at the next start.
 
-## Что умеет
+## Features
 
-**Подключение**
-- **Протоколы:** VLESS (Reality, gRPC, WebSocket, HTTPUpgrade, QUIC), VMess, Trojan, Shadowsocks (с плагинами), Hysteria и Hysteria2 (в том числе со сменой портов), TUIC, AnyTLS, WireGuard, NaiveProxy, SSH, SOCKS. **XHTTP, mKCP, VLESS со своим шифрованием и TCP с заголовком HTTP** ядро sing-box не запускает, их запускает Xray, который лежит рядом и стартует сам, когда такие серверы нужны. Не поддерживается только AmneziaWG, ShadowsocksR и Snell.
-- **Остаток трафика и срок подписки** видны над полем подписок, если провайдер их сообщает.
-- **Программы мимо VPN** и **только через VPN** (раздел «Программы» в расширенных настройках), **закрепление серверов** (правая кнопка мыши), **автозапуск** при входе в систему с подключением сразу.
-- **Подписки любого вида.** Ссылка подписки, ключи по одному, текст в base64, файл sing-box, Xray (в том числе список из нескольких конфигов), Clash и Clash Meta (в том числе однострочные записи), Shadowsocks SIP008. В поле можно вставить ссылку «открыть в приложении» (sing-box://, clash://, hiddify://, v2rayn://, sub://), адрес без https://, адрес в кавычках, в скобках или внутри фразы: программа сама достанет адрес. Если в подписке есть то, что не умеет никто из двух ядер (AmneziaWG, ShadowsocksR), эти серверы пропускаются, а программа говорит, сколько их и почему.
-- **Показывает, к какому серверу подключён.** Если выбран «Быстрейший из списка», на большой кнопке написано «Авто: …» с названием и флагом реального сервера, а строка в списке выделена синим. Если автовыбор переключился, надпись меняется.
-- **Не выбирает сервер в твоей стране, если там блокируют.** Программа сама определяет, из какой страны ты выходишь в интернет (мимо VPN). Если это Россия, «Быстрейший из списка» не берёт серверы с выходом в России: через них блокировки не обойти. В списке они серые, выбрать такой сервер вручную по-прежнему можно, а саму эту функцию можно выключить в «Настройках». Если ты не в России, российские серверы выбираются как любые другие.
-- **Российские сайты без VPN.** Галочка «Российские сайты напрямую» пускает российские сервисы мимо VPN, а остальное через него. Свои исключения можно дописать в поле ниже. Списки обновляются раз в неделю.
-- **Не оставляет сеть сломанной.** Если окно закрыто аварийно, ядро VPN завершается вместе с ним и интернет не пропадает.
+**Connection**
+- **Protocols:** VLESS (Reality, gRPC, WebSocket, HTTPUpgrade, QUIC), VMess, Trojan, Shadowsocks (with plugins), Hysteria and Hysteria2 (including port hopping), TUIC, AnyTLS, WireGuard, NaiveProxy, SSH, SOCKS. **XHTTP, mKCP, VLESS with its own encryption and TCP with an HTTP header** are not run by the sing-box core: [Xray](https://github.com/XTLS/Xray-core) runs them, it sits next to the program and starts by itself when such servers are needed. Only AmneziaWG, ShadowsocksR and Snell are not supported.
+- **Any kind of subscription.** A subscription link, single keys, base64 text, sing-box files, Xray (including a list of several configs), Clash and Clash Meta (including one-line entries), Shadowsocks SIP008. The box accepts an “open in the app” link (sing-box://, clash://, hiddify://, v2rayn://, sub://), an address without https://, in quotes, in brackets or inside a sentence: the program finds the address itself. What neither engine can run (AmneziaWG, ShadowsocksR) is skipped, and the program says how many servers and why.
+- **Traffic left and expiry date** are shown above the subscription box when the provider reports them.
+- **Programs outside the VPN**, or **only these programs through the VPN** (the “Programs” section of the advanced settings), **pinned servers** (right-click), **start at login** with an immediate connection.
+- **Shows which server it is connected to.** With “Fastest from the list” the big button says “Auto: …” with the name and flag of the real server, and the row in the list is blue. If auto choice switches, the text changes.
+- **Does not pick a server in your own country if that country blocks sites.** The program finds out which country you reach the internet from (outside the VPN). If it is a country where blocking happens (Russia, Belarus, China, Iran and a few others), “Fastest from the list” skips servers that exit there: they cannot get around the blocking. They are grey in the list and can still be chosen by hand; the function can be turned off in “Settings”. In other countries your own servers are used like any other.
+- **Your country's sites without the VPN.** The “Sites of the country go direct” box lets local services bypass the VPN and sends the rest through it. It works for any of more than 80 countries: the country's domain endings and its address lists (sing-geoip, and for Russia, China and Iran also lists of sites) are refreshed weekly. Your own exceptions can be added in the box below.
+- **Two languages.** The interface is in English and Russian; the language is chosen at the first start and changed in the same place as the country. The system's language is detected for you.
+- **Does not leave the network broken.** If the window is closed abnormally, the VPN core ends with it and the internet does not disappear.
 
-**Серверы**
-- **Честный тест.** Пинг (отклик на уже открытом соединении), скорость загрузки и страна, откуда сервер реально выходит в интернет. Тест идёт мимо любого включённого VPN. Пингуются все серверы одновременно, а скорость меряется по одному: иначе серверы делят канал и цифры врут.
-- **Флаг показывает реальную страну сервера.** До теста флаг берётся из названия, после теста по ответу Cloudflare: название у провайдера может не совпадать с реальностью. Если не совпало, это написано под большой кнопкой.
-- **Подписки обновляются сами** по интервалу, который сообщает провайдер. Если провайдер недоступен, остаются последние сохранённые серверы. Если подписку не загрузить, программа пишет причину простыми словами (сертификат, DNS, блокировка, отказ сайта) и сама пробует обходные пути: запасной DNS и загрузку через уже включённый VPN.
+**Servers**
+- **An honest test.** Ping (response on an already open connection), download speed and the country a server really exits from. The test goes around any VPN that is on. All servers are pinged at once, but speed is measured one by one: otherwise the servers share the channel and the numbers lie.
+- **The flag shows the server's real country.** Before the test the flag comes from the name, after it from Cloudflare's answer: a provider's name may not match reality. If it does not, this is written under the big button.
+- **Subscriptions refresh themselves** at the interval the provider gives. If the provider is unreachable, the last saved servers stay. If a subscription cannot be loaded, the program says why in plain words (certificate, DNS, blocking, the site's refusal) and tries ways around it itself: a backup DNS and loading through the VPN that is already on. A provider that gives different lists to different programs is asked as several programs, and the servers are merged.
 
-**Вид и удобство**
-- **Минималистичный вид.** В «Настройках» (мелкая серая ссылка внизу окна) флаги, пинг и скорость включаются и выключаются **по отдельности**. Что выключено, то не показывается и **не измеряется**: без скорости тест не качает файлы, без пинга не меряет отклик.
-- **Расширенные настройки для опытных.** Двойной щелчок по «Настройки» открывает отдельное окно: оформление (тема светлая, тёмная, контрастная или как в системе; цвет акцента или свой; масштаб; шрифт; толщина рамок; плотность списка; ширина, прозрачность и положение окна), порт локального прокси, режим сетевого адаптера, строгий маршрут, DNS-серверы, параметры «Быстрейшего из списка» и теста скорости, подробность журнала, переподключение. Над оформлением есть картинка: видно, как будет выглядеть программа, до перезапуска. Обычному пользователю там ничего менять не нужно; значение, которое не подошло ядру, программа сама заменяет обычным и всё равно подключается.
-- **Значок в области уведомлений.** Windows: у часов справа внизу, часто под стрелочкой «^». macOS: строка меню сверху. Linux: системный трей. Серый значок: VPN выключен, синий: подключён. Меню: «Показать окно», «Подключить» или «Отключить», «Выход». По умолчанию кнопка закрытия окна сворачивает программу в трей, а не выключает VPN: это отключается в «Настройках».
-- **Повторный запуск не плодит окна.** Если программа уже работает (в том числе в трее), второй запуск выводит её окно вперёд.
+**Look and comfort**
+- **Minimal look.** In “Settings” (the small grey link at the bottom) flags, ping and speed are switched on and off **separately**. What is off is not shown and **not measured**: without speed the test downloads nothing, without ping it measures no response.
+- **Advanced settings for experienced users.** Double-click “Settings” to open a window of its own: appearance (light, dark, high-contrast or the system's theme; an accent colour from the list or your own; scale; font; border thickness; list density; window width, opacity and position), the programs section, the local proxy port, the network adapter mode, strict routing, DNS servers, parameters of “Fastest from the list” and of the speed test, the log level, reconnecting. A live picture above the appearance settings shows how the program will look before the restart. An ordinary user needs to change nothing there; a value the core does not accept is replaced by the usual one and the program connects anyway.
+- **A tray icon.** Windows: by the clock at the bottom right, often under the “^” arrow. macOS: the menu bar. Linux: the system tray. Grey icon: the VPN is off, blue: connected. The menu: “Show window”, “Connect” or “Disconnect”, “Quit”. By default the close button hides the program in the tray instead of turning the VPN off: this can be changed in “Settings”.
+- **A second launch does not pile up windows.** If the program is already running (also in the tray), a second launch brings its window forward.
 
-## Автообновление
+## Auto-update
 
-При первом запуске программа спросит, обновляться ли автоматически. Если ты согласился:
+The first time you run the program it asks whether to update automatically. If you agree:
 
-| Когда | Что происходит |
+| When | What happens |
 |---|---|
-| **При каждом запуске** и **раз в 6 часов**, пока программа работает | Программа спрашивает у GitHub, нет ли новой версии. Мгновенно о выходе версии она не узнаёт: релиз появляется примерно через 10 минут после выпуска, а обнаруживается при ближайшей проверке. |
-| Нашлась новая версия | Файл скачивается в фоне только с GitHub (по `https` и только с адресов GitHub), его **контрольная сумма сверяется** с файлом `SHA256SUMS.txt` из того же релиза. Если сумма не совпала, файл отбрасывается. |
-| **Следующий запуск** или **выход** из программы | Новая версия устанавливается, VPN во время работы не прерывается. Закрытие окна в трей установкой не считается: нужен настоящий выход («Выход» в меню значка). |
-| Нужно сразу | В «Настройках» нажми «Проверить», а потом «Установить»: программа отключит VPN и перезапустится. |
+| **At every start** and **every 6 hours** while it runs | The program asks GitHub whether there is a new version. It does not learn of a release instantly: it appears about 10 minutes after it is published and is found at the next check. |
+| A new version is found | The file is downloaded in the background only from GitHub (over `https` and only from GitHub addresses) and its **checksum is compared** with `SHA256SUMS.txt` from the same release. If the checksum does not match, the file is thrown away. |
+| The **next start** or **quit** | The new version is installed; the VPN is not interrupted while the program runs. Closing the window to the tray does not count: a real quit is needed (“Quit” in the icon's menu). |
+| You need it now | In “Settings” press “Check” and then “Install”: the program turns the VPN off and restarts. |
 
-Включить и выключить автообновление и проверить версию вручную можно в «Настройках» внизу окна, номер установленной версии написан справа от них. Если автообновление выключено, программа сама ничего не проверяет и не скачивает.
+Auto-update can be switched on and off, and the version checked by hand, in “Settings” at the bottom of the window; the installed version is written to the right of them. With auto-update off the program checks and downloads nothing by itself.
 
 > [!IMPORTANT]
-> Контрольная сумма защищает от повреждённой загрузки, но не от подмены самого релиза: обновление доверяет этому репозиторию. Если ты не хочешь этого, выключи автообновление и собирай из исходников.
+> The checksum protects against a damaged download, but not against the release itself being replaced: the update trusts this repository. If you do not want that, turn auto-update off and build from source.
 
-## Частые вопросы
+## FAQ
 
 <details>
-<summary><b>Windows пишет «Система Windows защитила ваш компьютер»</b></summary>
+<summary><b>Windows says “Windows protected your PC”</b></summary>
 
-Программа не подписана платным сертификатом, поэтому SmartScreen и некоторые антивирусы настораживаются. Нажми «Подробнее» → «Выполнить в любом случае». Если не доверяешь готовому файлу, собери его сам из исходников (ниже): всё открыто.
+The program is not signed with a paid certificate, so SmartScreen and some antiviruses get cautious. Press “More info” → “Run anyway”. If you do not trust the ready-made file, build it yourself from source (below): everything is open.
 </details>
 
 <details>
-<summary><b>macOS пишет, что программу нельзя открыть</b></summary>
+<summary><b>macOS says the program cannot be opened</b></summary>
 
-Нажми на неё правой кнопкой, выбери «Открыть» и подтверди. Один раз этого достаточно. Либо в терминале: `xattr -dr com.apple.quarantine FimaVPN.app`.
+Right-click it, choose “Open” and confirm. Once is enough. Or in the terminal: `xattr -dr com.apple.quarantine FimaVPN.app`.
 </details>
 
 <details>
-<summary><b>На Linux не открывается окно пароля</b></summary>
+<summary><b>On Linux the password window does not open</b></summary>
 
-Нужен `pkexec` (пакет `polkit`) и запущенный графический агент polkit: в обычных рабочих окружениях (GNOME, KDE, XFCE) он есть. Без него подключиться нельзя: ядру VPN нужны права для создания сетевого адаптера.
+`pkexec` (the `polkit` package) and a running polkit graphical agent are needed: ordinary desktops (GNOME, KDE, XFCE) have it. Without it you cannot connect: the VPN core needs rights to create a network adapter.
 </details>
 
 <details>
-<summary><b>Значка в трее не видно</b></summary>
+<summary><b>I cannot see the tray icon</b></summary>
 
-В Windows новые значки прячутся под стрелочкой «^» у часов: перетащи значок на панель, чтобы он был всегда на виду. На Linux значок виден в окружениях с треем (XFCE, KDE, MATE и др.); в GNOME трея по умолчанию нет, поставь расширение AppIndicator. Если значка нет вовсе, программа работает как обычно, а кнопка закрытия окна просто закрывает её.
+On Windows new icons hide under the “^” arrow by the clock: drag the icon to the bar so it is always in view. On Linux the icon is visible in desktops with a tray (XFCE, KDE, MATE and others); GNOME has no tray by default, install the AppIndicator extension. If there is no icon at all, the program works as usual and the close button simply closes it.
 </details>
 
 <details>
-<summary><b>Не подключается</b></summary>
+<summary><b>It does not connect</b></summary>
 
-Открой раздел «Лог» внизу окна: там причина. Частые причины: подписка устарела (проверь её в кабинете провайдера), запущен другой VPN (Karing, v2rayN, Hiddify, NekoRay: выключи его), на Windows нет прав администратора.
+Open “Log” at the bottom of the window: the reason is there. Common causes: the subscription expired (check it in the provider's account), another VPN is running (Karing, v2rayN, Hiddify, NekoRay: turn it off), on Windows there are no administrator rights.
 </details>
 
 <details>
-<summary><b>Где взять подписку?</b></summary>
+<summary><b>Where do I get a subscription?</b></summary>
 
-У VPN-провайдера или на собственном сервере (панели 3x-ui, Marzban, Remnawave выдают такие ссылки).
+From a VPN provider, or from your own server (3x-ui, Marzban and Remnawave panels give such links).
 </details>
 
 <details>
-<summary><b>Где хранятся данные?</b></summary>
+<summary><b>Where is my data stored?</b></summary>
 
-Windows: `%APPDATA%\FimaVPN`. Linux: `~/.config/FimaVPN`. macOS: `~/Library/Application Support/FimaVPN`. Там настройки, сохранённые серверы и логи. Ссылки-подписки работают как пароль: не публикуй их и не присылай другим.
+Windows: `%APPDATA%\FimaVPN`. Linux: `~/.config/FimaVPN`. macOS: `~/Library/Application Support/FimaVPN`. Settings, saved servers and logs are there. Subscription links work like a password: do not publish them or send them to others.
 </details>
 
-## Сборка из исходников
+<details>
+<summary><b>Which country should I choose?</b></summary>
 
-Нужен Python 3.12+ с tkinter.
+The one you are in. Its sites (banks, government services, local shops) then open without the VPN, which is faster and does not trip services that distrust foreign addresses. The country is suggested from your connection and system settings. If you want everything through the VPN, choose “None”.
+</details>
+
+## Building from source
+
+Python 3.12+ with tkinter is needed.
 
 ```powershell
 # Windows
@@ -160,16 +170,16 @@ cd windows-vpn-client
 ```
 
 ```sh
-# Linux и macOS
+# Linux and macOS
 git clone https://github.com/serafimbelskih32-source/windows-vpn-client.git
 cd windows-vpn-client
 ./build.sh
 ```
 
-Скрипт скачает ядро sing-box 1.13.14 и соберёт программу в папку `dist`. Все версии для релиза собирает [GitHub Actions](.github/workflows/release.yml): достаточно поставить тег `v…`, и сборки под все системы появятся в релизе вместе с `SHA256SUMS.txt`.
+The script downloads the sing-box 1.13.14 core (and Xray for XHTTP) and builds the program into the `dist` folder. All release builds are made by [GitHub Actions](.github/workflows/release.yml): push a `v…` tag and the builds for every system appear in the release together with `SHA256SUMS.txt`.
 
-Проверки: `python tests/test_updater.py` (автообновление), `python tests/test_flags.py` (флаги), `python tests/test_tray.py` (значок в трее), `python tests/test_supervisor.py` (запуск ядра на Linux и macOS).
+Checks (each runs as `python tests/<name>.py`): `test_sources` (every kind of subscription and link), `test_engines` (Xray, WireGuard, the whole chain), `test_i18n` (translations and countries), `test_english` and `test_design` (the window in several languages, fonts and scales), `test_features`, `test_app`, `test_robust`, `test_updater`, `test_flags`, `test_tray`, `test_supervisor`. `tests/shots.py` takes pictures of every window.
 
-## Лицензии
+## Licences
 
-Код программы распространяется под лицензией MIT (файл `LICENSE`). Внутри работает ядро [sing-box](https://github.com/SagerNet/sing-box) под GPL-3.0 (подробности в `THIRD_PARTY_NOTICES.md`).
+The program's code is released under the MIT licence (the `LICENSE` file). It runs the [sing-box](https://github.com/SagerNet/sing-box) core under GPL-3.0 and [Xray-core](https://github.com/XTLS/Xray-core) under MPL-2.0 (details in `THIRD_PARTY_NOTICES.md`).

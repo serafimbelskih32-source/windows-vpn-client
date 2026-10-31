@@ -1,11 +1,11 @@
-name: Что-то не работает
-description: Расскажи, что случилось, и я разберусь
+name: Something does not work / Что-то не работает
+description: Tell us what happened (English or Russian) / Расскажи, что случилось (по-английски или по-русски)
 labels: ["bug"]
 body:
   - type: dropdown
     id: os
     attributes:
-      label: Система
+      label: System / Система
       options:
         - Windows 10 / 11
         - Linux x86_64
@@ -17,20 +17,25 @@ body:
   - type: input
     id: version
     attributes:
-      label: Версия программы
-      description: Номер написан внизу окна справа, например v1.2.0.
+      label: Program version / Версия программы
+      description: The number is at the bottom right of the window, for example v1.5.0. / Номер написан внизу окна справа, например v1.5.0.
     validations:
       required: true
+  - type: input
+    id: region
+    attributes:
+      label: Country and language chosen in the program / Выбранные страна и язык
+      description: For example "Germany, English". Helps with problems of "sites of my country without the VPN". / Например «Германия, русский». Помогает при проблемах с «сайтами моей страны без VPN».
   - type: textarea
     id: what
     attributes:
-      label: Что случилось
-      description: Что ты нажимал, что ожидал увидеть и что увидел на самом деле.
+      label: What happened / Что случилось
+      description: What you pressed, what you expected and what you saw instead. / Что ты нажимал, что ожидал увидеть и что увидел на самом деле.
     validations:
       required: true
   - type: textarea
     id: log
     attributes:
-      label: Текст из раздела «Лог»
-      description: Раздел «Лог» находится внизу окна. Перед отправкой убери из текста ссылки-подписки и ключи: они работают как пароль.
+      label: Text from the "Log" section / Текст из раздела «Лог»
+      description: The log is at the bottom of the window. Before sending, remove subscription links and keys from it, they work like a password. / Раздел «Лог» находится внизу окна. Перед отправкой убери из текста ссылки-подписки и ключи, они работают как пароль.
       render: text

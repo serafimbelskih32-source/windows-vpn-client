@@ -7,13 +7,14 @@ from PIL import Image, ImageDraw, ImageFont
 INK, BLUE, PAPER, MUTE, WHITE = (18, 21, 27), (30, 60, 255), (246, 247, 248), (85, 92, 103), (255, 255, 255)
 FONT = r"C:\Windows\Fonts\bahnschrift.ttf"
 
-BUTTONS = [
-    ("dl-windows.png", "Windows", "10 и 11", True),
-    ("dl-linux-x86_64.png", "Linux", "x86_64", False),
-    ("dl-linux-arm64.png", "Linux", "ARM64", False),
-    ("dl-macos-arm64.png", "macOS", "Apple Silicon (M1 и новее)", False),
-    ("dl-macos-x86_64.png", "macOS", "Intel", False),
-]
+BUTTONS = {  # file, title, subtitle (per language), the main button is blue
+    "ru": [("dl-windows.png", "Windows", "10 и 11", True), ("dl-linux-x86_64.png", "Linux", "x86_64", False),
+           ("dl-linux-arm64.png", "Linux", "ARM64", False), ("dl-macos-arm64.png", "macOS", "Apple Silicon (M1 и новее)", False),
+           ("dl-macos-x86_64.png", "macOS", "Intel", False)],
+    "en": [("dl-windows-en.png", "Windows", "10 and 11", True), ("dl-linux-x86_64-en.png", "Linux", "x86_64", False),
+           ("dl-linux-arm64-en.png", "Linux", "ARM64", False), ("dl-macos-arm64-en.png", "macOS", "Apple Silicon (M1 and newer)", False),
+           ("dl-macos-x86_64-en.png", "macOS", "Intel", False)],
+}
 
 
 def font(size, weight):
@@ -48,6 +49,7 @@ def button(path, title, sub, primary):
 
 if __name__ == "__main__":
     os.makedirs("docs", exist_ok=True)
-    for name, title, sub, primary in BUTTONS:
-        button(os.path.join("docs", name), title, sub, primary)
-    print("buttons:", [b[0] for b in BUTTONS])
+    for lang, rows in BUTTONS.items():
+        for name, title, sub, primary in rows:
+            button(os.path.join("docs", name), title, sub, primary)
+    print("buttons:", [b[0] for rows in BUTTONS.values() for b in rows])

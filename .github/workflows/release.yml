@@ -95,10 +95,11 @@ jobs:
           python tests/test_tray.py
           python tests/test_supervisor.py
           python tests/test_sources.py
+          python tests/test_i18n.py
           python tests/test_engines.py
           python tests/test_robust.py
           # the window-level suite hangs inside Tk's update() on the macOS runner (not understood yet): Windows and Linux only
-          if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python tests/test_app.py; xvfb-run -a python tests/test_design.py; xvfb-run -a python tests/test_features.py; elif [ "$RUNNER_OS" = "Windows" ]; then python tests/test_app.py; python tests/test_design.py; python tests/test_features.py; fi
+          if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python tests/test_app.py; xvfb-run -a python tests/test_design.py; xvfb-run -a python tests/test_features.py; xvfb-run -a python tests/test_english.py; elif [ "$RUNNER_OS" = "Windows" ]; then python tests/test_app.py; python tests/test_design.py; python tests/test_features.py; python tests/test_english.py; fi
           python vpn.py --selftest < tests/sample_links.txt
           if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python tests/gui_smoke.py; else python tests/gui_smoke.py; fi
 
@@ -112,6 +113,8 @@ jobs:
           run shots/light-1.0 1.0
           run shots/light-1.5 1.5
           run shots/dark-1.0 1.0 theme=dark accent=green
+          FIMA_LANG=en run shots/en-light-1.0 1.0 region=DE
+          FIMA_LANG=en run shots/en-dark-1.5 1.5 region=GB theme=dark
 
       - uses: actions/upload-artifact@v4
         if: always() && github.event_name == 'workflow_dispatch'

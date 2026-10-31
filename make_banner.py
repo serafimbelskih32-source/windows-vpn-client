@@ -19,15 +19,19 @@ def font(size, weight=700):
     return f
 
 
-def banner(w, h, path):
+TEXT = {"ru": ("VPN-клиент", "Вставил подписку. Выбрал сервер. Нажал кнопку."),
+        "en": ("VPN client", "Paste a subscription. Pick a server. Press connect.")}
+
+
+def banner(w, h, path, lang="ru"):
     im = Image.new("RGB", (w, h), BG)
     d = ImageDraw.Draw(im)
     s = int(h * 0.62)  # icon size
     ix, iy = int(h * 0.19), (h - s) // 2
     im.paste(draw(1024).resize((s, s), Image.LANCZOS), (ix, iy), draw(1024).resize((s, s), Image.LANCZOS))
     tx = ix + s + int(h * 0.12)
-    d.text((tx, int(h * 0.20)), "VPN-клиент", font=font(int(h * 0.27)), fill=INK)
-    d.text((tx, int(h * 0.55)), "Вставил подписку. Выбрал сервер. Нажал кнопку.", font=font(int(h * 0.075), 500), fill=MUTE)
+    d.text((tx, int(h * 0.20)), TEXT[lang][0], font=font(int(h * 0.27)), fill=INK)
+    d.text((tx, int(h * 0.55)), TEXT[lang][1], font=font(int(h * 0.075), 500), fill=MUTE)
     # the three systems as hard-edged tags, like the buttons in the app
     x, y, fs = tx, int(h * 0.72), int(h * 0.062)
     for label in ("Windows", "Linux", "macOS"):
@@ -44,4 +48,6 @@ def banner(w, h, path):
 
 if __name__ == "__main__":
     banner(1600, 480, os.path.join("docs", "banner.png"))
-    banner(1280, 640, os.path.join("docs", "social-preview.png"))
+    banner(1280, 640, os.path.join("docs", "social-preview-ru.png"))
+    banner(1600, 480, os.path.join("docs", "banner-en.png"), "en")
+    banner(1280, 640, os.path.join("docs", "social-preview.png"), "en")  # the one to upload: English first

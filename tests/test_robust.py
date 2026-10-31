@@ -196,10 +196,12 @@ check("pro: good values pass (strings of digits become numbers)", not errs and g
 for key, bad in (("mixed_port", "80"), ("mixed_port", "70000"), ("mixed_port", "abc"), ("mixed_port", True), ("mixed_port", 3.5),
                  ("auto_interval", 0), ("auto_tolerance", -1), ("test_top", 51), ("test_parallel", 129), ("test_secs", 31),
                  ("tun_stack", "tap"), ("log_level", "trace"), ("strict_route", "yes"), ("auto_reconnect", 1),
-                 ("dns_remote", "not a host"), ("dns_remote", "999.1.1.1"), ("dns_local", "http://x"), ("dns_local", ""),
+                 ("dns_remote", "not a host"), ("dns_remote", "999.1.1.1"), ("dns_local", "http://x"),
                  ("auto_url", "ftp://x.example"), ("auto_url", "https://"), ("auto_url", "https://a b"), ("auto_url", "https://x/" + "a" * 300)):
     v, e = vpn.clean_pro({key: bad})
     check(f"pro: {key}={bad!r} is refused and the default stays", key in e and v[key] == vpn.PRO_DEFAULTS[key], (v[key], e))
+v, e = vpn.clean_pro({"dns_local": ""})
+check("pro: an empty local DNS is fine (it means the chosen country's, or the system's)", "dns_local" not in e and v["dns_local"] == "", (v["dns_local"], e))
 check("pro: junk instead of a dict gives the defaults", all(vpn.clean_pro(x) == (vpn.PRO_DEFAULTS, {}) for x in (None, 5, "x", [1])))
 check("pro: unknown keys are ignored", vpn.clean_pro({"nonsense": 1}) == (vpn.PRO_DEFAULTS, {}))
 check("pro: every default is itself valid", vpn.clean_pro(vpn.PRO_DEFAULTS) == (vpn.PRO_DEFAULTS, {}))

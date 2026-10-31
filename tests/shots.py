@@ -30,11 +30,13 @@ vpn.RULES_DIR = os.path.join(TMP, "rules")
 vpn.LOGFILE = os.path.join(TMP, "sing-box.log")
 vpn.kill_stale_cores = lambda *a, **k: 0  # never touch a real running core
 vpn.detect_home = lambda *a, **k: None
+import json
+region = extra.pop("region", "RU")
+json.dump({"region": region, "lang": os.environ["FIMA_LANG"], "setup_done": True}, open(vpn.SETTINGS, "w", encoding="utf-8"))
 if extra:
-    import json
     pro = {k: (v if not v.isdigit() else int(v)) for k, v in extra.items()}
     pro = {k: (True if v == "true" else False if v == "false" else v) for k, v in pro.items()}
-    json.dump({"pro": pro}, open(vpn.SETTINGS, "w", encoding="utf-8"))
+    json.dump({"pro": pro, "region": region, "lang": os.environ["FIMA_LANG"], "setup_done": True}, open(vpn.SETTINGS, "w", encoding="utf-8"))
 
 orig_init = tk.Tk.__init__
 
@@ -53,6 +55,11 @@ NAMES = ["🇩🇪 Германия, Франкфурт 1", "🇫🇮 Финля
          "🇺🇸 США, Нью-Йорк, очень длинное название сервера, которое не помещается в строку", "🇷🇺 Россия, Москва",
          "🇯🇵 Япония, Токио", "🇹🇷 Турция, Стамбул", "🇰🇿 Казахстан, Алматы", "🇦🇪 ОАЭ, Дубай", "🇵🇱 Польша, Варшава",
          "🇬🇧 Великобритания, Лондон"]
+if os.environ["FIMA_LANG"] == "en":
+    NAMES = ["🇩🇪 Germany, Frankfurt 1", "🇫🇮 Finland, Helsinki", "🇳🇱 Netherlands, Amsterdam", "🇸🇪 Sweden, Stockholm",
+             "🇺🇸 United States, New York, a very long server name that does not fit in the row", "🇷🇺 Russia, Moscow",
+             "🇯🇵 Japan, Tokyo", "🇹🇷 Turkey, Istanbul", "🇰🇿 Kazakhstan, Almaty", "🇦🇪 UAE, Dubai", "🇵🇱 Poland, Warsaw",
+             "🇬🇧 United Kingdom, London"]
 UUID = "11111111-2222-3333-4444-555555555555"
 
 
@@ -82,7 +89,10 @@ def shot(win, name):
     x, y, w, h = win.winfo_rootx(), win.winfo_rooty(), win.winfo_width(), win.winfo_height()
     box = (max(0, x - 10), max(0, y - 44), x + w + 10, y + h + 14)
     try:
-        ImageGrab.grab(bbox=box).save(os.path.join(out_dir, name + ".png"))
+        full = ImageGrab.grab(bbox=box)
+        full.save(os.path.join(out_dir, name + ".png"))
+        cx, cy = x - box[0], y - box[1]
+        full.crop((cx, cy, cx + w, cy + h)).save(os.path.join(out_dir, name + "_client.png"))  # the window's own pixels, for the docs
         print("shot", name, f"{w}x{h}", flush=True)
     except Exception as e:  # noqa: BLE001  (no screen permission / no display: say so, do not fail the build)
         print("no shot", name, e, flush=True)
@@ -99,7 +109,7 @@ shot(app, "00_empty")
 
 xh = (f"vless://{UUID}@10.0.1.1:443?type=xhttp&security=reality&pbk=Y8bq6x0Q4s2v3m3pXw4m0hJq0kQy7Q3v1xk3nq0o3gE&sni=www.microsoft.com"
       "&fp=chrome&sid=ab12&path=%2F&mode=stream-one#🇳🇱 Нидерланды, XHTTP")
-info = {"title": "Мой провайдер", "usage": {"upload": 20 * 2**30, "download": 250 * 2**30, "total": 300 * 2**30, "expire": int(time.time()) + 40 * 86400}}
+info = {"title": "My provider" if os.environ["FIMA_LANG"] == "en" else "Мой провайдер", "usage": {"upload": 20 * 2**30, "download": 250 * 2**30, "total": 300 * 2**30, "expire": int(time.time()) + 40 * 86400}}
 app.subs = {"https://sub.example/x": {"outs": vpn.parse_text("\n".join([link(n, i) for i, n in enumerate(NAMES)] + [xh])), "info": info,
                                       "time": time.time(), "ua": "v2rayN/7.0"}}
 app.cfg["sources"] = "https://sub.example/x"
@@ -113,17 +123,21 @@ for i, o in enumerate(app.outs):
     app._cell(i, ping=app.results[o["tag"]][0], speed=app.results[o["tag"]][1])
 app.toggle_pin(2)
 app.sort_rows()
-app.say("Самый быстрый: Финляндия (140 Мбит/с, 55 мс). Скорость измерена загрузкой с speed.cloudflare.com.")
+EN = os.environ["FIMA_LANG"] == "en"
+app.say((vpn.T("Самый быстрый: {0} ({1}).").format("Finland", "140 Mbit/s, 55 ms") + vpn.T(" Скорость измерена загрузкой с {0}.").format("speed.cloudflare.com")) if EN else
+        "Самый быстрый: Финляндия (140 Мбит/с, 55 мс). Скорость измерена загрузкой с speed.cloudflare.com.")
 shot(app, "01_main_off")
 
 app.state, app.api, app.current, app.t0 = "on", ("x", "y"), app.outs[1]["tag"], time.time() - 3725
 app.refresh_power()
-app.say("Подключено. В Windows включён прокси 127.0.0.1:3067 (другая программа): браузер идёт через него, а не через этот VPN.", err=False)
+app.say(("Connected. " + vpn.T("В Windows включён прокси {0} (другая программа): браузер идёт через него, а не через этот VPN.").format("127.0.0.1:3067")) if EN else
+        "Подключено. В Windows включён прокси 127.0.0.1:3067 (другая программа): браузер идёт через него, а не через этот VPN.", err=False)
 shot(app, "02_main_on")
 app.state, app.api, app.current = "off", None, ""
 app.refresh_power()
 
-app.say("Не получилось получить подписку sub.example: сайт не ответил вовремя. Возможно, его блокирует провайдер: включи другой VPN и нажми «Обновить».", err=True)
+app.say(("sub.example: " + vpn.updater.explain(TimeoutError("timed out")) + ".") if EN else
+        "Не получилось получить подписку sub.example: сайт не ответил вовремя. Возможно, его блокирует провайдер: включи другой VPN и нажми «Обновить».", err=True)
 app.toggle_settings(True)
 shot(app, "03_main_settings")
 app.toggle_log(True)
@@ -151,6 +165,15 @@ for kind, text, buttons in (("question", vpn.MSG_DEAD_PROXY.format(addr="127.0.0
     d = vpn.Dialog(app, text, buttons, kind, 0, 1)
     shot(d, "07_dialog_" + kind)
     d.destroy()
+
+d = vpn.SetupDialog(app, "", True, "DE")
+shot(d, "08_setup_first")
+d.query.set("a")
+d.refill()
+d.destroy()
+d = vpn.SetupDialog(app, "FR", False, "")
+shot(d, "09_setup_country")
+d.destroy()
 
 app.destroy()
 print("done", flush=True)

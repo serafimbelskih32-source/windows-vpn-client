@@ -37,7 +37,6 @@ import updater
 
 updater.trust_certificates()  # a packaged program on a Mac has no certificates of its own: without this no https works
 
-AUTO_LABEL = T("Быстрейший из списка")
 APP = "FimaVPN"  # settings folder name only
 TITLE = "VPN"
 IS_WIN = sys.platform == "win32"
@@ -66,6 +65,7 @@ INSTANCE_FILE = os.path.join(DATA, "instance.port")  # loopback port of the runn
 UPDATE_DIR = updater.update_dir(DATA)  # a downloaded, verified update waits here for the next start (one folder per program file)
 SETTINGS = os.path.join(DATA, "settings.json")
 i18n.set_language(i18n.initial_language(SETTINGS))  # before any text below is made
+AUTO_LABEL = T("Быстрейший из списка")
 RUNCFG = os.path.join(DATA, "run.json")
 LOGFILE = os.path.join(DATA, "sing-box.log")
 TESTCFG = os.path.join(DATA, "test.json")
@@ -111,17 +111,11 @@ def FZ(n):
     """Font size: Tk on macOS counts points as pixels (72 dpi), so sizes need a boost to match Windows."""
     return int(round(n * 1.33)) if IS_MAC else n
 
-RU_SUFFIXES = ["ru", "su", "xn--p1ai", "yandex.net", "yastatic.net", "vk.com", "userapi.com",
-               "vkuser.net", "mail.ru", "ok.ru", "sberbank.ru", "tinkoff.ru", "gosuslugi.ru"]
-
-# RU lists for "Russian sites direct". Copies bundled in core/ are the fallback; fresher ones are
-# downloaded weekly through the tunnel into RULES_DIR and win while they are valid.
-RULE_SETS = {
-    "geosite-ru": ("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs",
-                   "https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-ru.srs"),
-    "geoip-ru": ("https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs",
-                 "https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-ru.srs"),
-}
+RU_SUFFIXES = regions.suffixes("RU")
+# Lists of the chosen country's addresses and sites: copies for Russia are bundled in core/ as the fallback; fresher ones (and
+# those of every other country) are downloaded weekly into RULES_DIR and win while they are valid.
+RULE_SETS = regions.rule_sets("RU")
+LOCAL_DNS = "77.88.8.8"  # what resolves the chosen country's sites; '' = the system's resolver (set from the region at start)
 RULES_EVERY = 7 * 24 * 3600
 RULES_RETRY = 6 * 3600
 
@@ -215,15 +209,20 @@ def rule_path(tag):
     return None
 
 
-def update_rule_sets(port):
-    """Download fresh RU lists through the local proxy, i.e. through the VPN. Returns how many updated."""
+def update_rule_sets(port, region="RU"):
+    """Download fresh lists of the region's sites through the local proxy, i.e. through the VPN (port=None: directly, as a
+    first try for a country whose lists are not on this computer yet). Returns how many updated."""
     os.makedirs(RULES_DIR, exist_ok=True)
     done = 0
-    for tag, urls in RULE_SETS.items():
+    for tag, urls in regions.rule_sets(region).items():
         for url in urls:
             try:
-                with _opener(port).open(url, timeout=30) as r:
-                    data = r.read(20_000_000)
+                if port:
+                    with _opener(port).open(url, timeout=30) as r:
+                        data = r.read(20_000_000)
+                else:
+                    with updater.urlopen(urllib.request.Request(url, headers={"User-Agent": "FimaVPN"}), timeout=30) as r:
+                        data = r.read(20_000_000)
             except Exception:
                 continue
             if not srs_ok(data):
@@ -284,7 +283,8 @@ def human_bytes(n):
     for unit, size in ((T("ТБ"), 1 << 40), (T("ГБ"), 1 << 30), (T("МБ"), 1 << 20)):
         if n >= size:
             v = n / size
-            return (f"{v:.0f}" if v >= 100 else f"{v:.1f}".replace(".", ",").removesuffix(",0")) + " " + unit
+            sep = "," if i18n.LANG == "ru" else "."  # the decimal mark
+            return (f"{v:.0f}" if v >= 100 else f"{v:.1f}".replace(".", sep).removesuffix(sep + "0")) + " " + unit
     return T("{0:.0f} КБ").format(n / 1024) if n >= 1024 else T("{0:.0f} Б").format(n)
 
 
@@ -468,7 +468,7 @@ PRO_FIELDS = {
     "strict_route": (True, "bool", None),
     "auto_reconnect": (True, "bool", None),
     "dns_remote": ("1.1.1.1", "host", None),
-    "dns_local": ("77.88.8.8", "host", None),
+    "dns_local": ("", "host", None),  # '' = the one of the chosen country, or the system's where it has none
     "auto_url": ("https://www.gstatic.com/generate_204", "url", None),
     "auto_interval": (3, "int", (1, 60)),
     "auto_tolerance": (50, "int", (0, 1000)),
@@ -529,6 +529,9 @@ def clean_pro(raw):
                 v = ("#" + v.lstrip("#")).upper() if v else ""
             elif kind == "host":
                 v = str(v).strip()
+                if v == "" and k == "dns_local":
+                    out[k] = v
+                    continue
                 if not _HOST.match(v) or any(int(p) > 255 for p in v.split(".") if v.replace(".", "").isdigit()):
                     raise ValueError(T("нужен адрес вида 1.1.1.1 или dns.google"))
             elif kind == "url":
@@ -593,7 +596,12 @@ def open_url(url):
 
 
 # ---------- config build ----------
-def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None, mixed_port=None, pro=None, xray_ports=None):
+def local_dns_server(addr):
+    """The sing-box DNS server entry named "local": a resolver at `addr`, or the system's own when there is no address."""
+    return {"type": "udp", "tag": "local", "server": addr} if addr else {"type": "local", "tag": "local"}
+
+
+def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None, mixed_port=None, pro=None, xray_ports=None, region="RU"):
     """`api` = (port, secret): expose the core's local API so the window can show which server auto mode picked.
     `auto_tags`: the servers «Быстрейший из списка» may choose from (default: all); a hand-picked server is always allowed.
     `pro`: advanced settings (see PRO_FIELDS); missing or wrong values mean the defaults."""
@@ -621,9 +629,10 @@ def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None
     if only:  # only these programs go through the VPN: the rest leaves directly
         rules.append({"process_name": only, "outbound": "proxy"})
     rule_sets = []
-    if ru_direct:
-        rules.append({"domain_suffix": RU_SUFFIXES, "outbound": "direct"})
-        for tag in ("geosite-ru", "geoip-ru"):
+    mine = ru_direct and region in regions.NAMES  # this country's sites go without the VPN
+    if mine:
+        rules.append({"domain_suffix": regions.suffixes(region), "outbound": "direct"})
+        for tag in regions.rule_sets(region):
             path = rule_path(tag)
             if path:
                 rules.append({"rule_set": [tag], "outbound": "direct"})
@@ -635,10 +644,11 @@ def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None
         dns_rules.append({"process_name": bypass, "server": "local"})
     if only:
         dns_rules.append({"process_name": only, "server": "remote"})
-    if ru_direct:
-        dns_rules.append({"domain_suffix": RU_SUFFIXES, "server": "local"})
-        if any(rs["tag"] == "geosite-ru" for rs in rule_sets):
-            dns_rules.append({"rule_set": ["geosite-ru"], "server": "local"})
+    if mine:
+        dns_rules.append({"domain_suffix": regions.suffixes(region), "server": "local"})
+        for rs in rule_sets:
+            if rs["tag"].startswith("geosite-"):
+                dns_rules.append({"rule_set": [rs["tag"]], "server": "local"})
     if domains:
         dns_rules.append({"domain_suffix": domains, "server": "local"})
     # proxy server hostnames must resolve via local dns (not through the tunnel)
@@ -648,7 +658,7 @@ def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None
     cfg = {
         "log": {"level": pro["log_level"], "timestamp": True, "output": LOGFILE},
         "dns": {"servers": [{"type": "https", "tag": "remote", "server": pro["dns_remote"], "detour": "proxy"},
-                            {"type": "udp", "tag": "local", "server": pro["dns_local"]}],
+                            local_dns_server(pro["dns_local"] or regions.local_dns(region))],
                 "rules": dns_rules, "final": "local" if only else "remote", "strategy": "ipv4_only"},
         "inbounds": [
             dict({"type": "tun", "tag": "tun-in", "address": ["172.19.0.1/30"], "auto_route": True,
@@ -1028,7 +1038,7 @@ PRO_LAYOUT = (
     )),
     ("DNS", (
         ("dns_remote", T("DNS через VPN"), "entry", T("Адрес или имя DNS-сервера для обычных сайтов.")),
-        ("dns_local", T("DNS для российских сайтов"), "entry", T("Работает мимо VPN, когда включено «Российские сайты напрямую».")),
+        ("dns_local", T("DNS для сайтов своей страны"), "entry", T("Работает мимо VPN, когда включено «Сайты страны напрямую». Пусто: DNS выбранной страны, а где его нет, DNS системы.")),
     )),
     (T("Быстрейший из списка"), (
         ("auto_url", T("Адрес для проверки отклика"), "entry", None),
@@ -1246,6 +1256,130 @@ class ProWindow(tk.Toplevel):
         self.destroy()
 
 
+class SetupDialog(tk.Toplevel):
+    """Language and country, in the program's style: shown at the very first start, and from the «Страна» button. The sites of
+    the chosen country go without the VPN. `result` = (language, country code or 'NONE'), None if closed without choosing."""
+    def __init__(self, parent, region, first=False, suggest=""):
+        super().__init__(parent)
+        self.withdraw()
+        self.result = None
+        self.first = first
+        self.start_lang = i18n.LANG
+        self.lang = tk.StringVar(value=i18n.LANG)
+        self.query = tk.StringVar()
+        self.picked = region if (regions.valid(region) and region) else (suggest if regions.valid(suggest) and suggest else regions.NONE)
+        self.configure(bg=INK)
+        self.resizable(False, False)
+        try:
+            if IS_WIN:
+                self.iconbitmap(os.path.join(BASE, "icon.ico"))
+        except Exception:  # noqa: BLE001
+            pass
+        set_window_icon(self)
+        self.fam = ui_family(self)
+        self.body = tk.Frame(self, bg=BG)
+        self.body.pack(padx=BW() + P(1), pady=BW() + P(1))
+        self.lang.trace_add("write", lambda *a: self.relanguage())
+        self.build()
+        self.bind("<Escape>", lambda e: self.close(False))
+        self.protocol("WM_DELETE_WINDOW", lambda: self.close(first))
+        self.update_idletasks()
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        try:
+            shown = bool(parent.winfo_viewable())
+        except tk.TclError:
+            shown = False
+        if shown:
+            x = parent.winfo_rootx() + (parent.winfo_width() - w) // 2
+            y = parent.winfo_rooty() + max(P(10), (parent.winfo_height() - h) // 3)
+            self.transient(parent)
+        else:
+            x, y = (self.winfo_screenwidth() - w) // 2, (self.winfo_screenheight() - h) // 3
+        self.geometry(f"+{max(0, x)}+{max(0, y)}")
+        self.deiconify()
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+        self.focus_force()
+        self.wait_window(self)
+
+    def build(self):
+        for w in self.body.winfo_children():
+            w.destroy()
+        self.title(TITLE)
+        f_b, f_s = (self.fam, FZ(11)), (self.fam, FZ(10))
+        pad = tk.Frame(self.body, bg=BG)
+        pad.pack(padx=P(22), pady=P(18))
+        tk.Label(pad, text=T("Добро пожаловать") if self.first else T("Язык и страна"), font=(self.fam, FZ(14), "bold"), bg=BG, fg=INK,
+                 anchor="w").pack(fill="x")
+        lrow = tk.Frame(pad, bg=BG)
+        lrow.pack(fill="x", pady=(P(12), P(8)))
+        tk.Label(lrow, text=T("Язык"), font=f_b, bg=BG, fg=INK).pack(side="left")
+        Segmented(lrow, tuple(i18n.LANGS), self.lang, f_b, i18n.LANGS).pack(side="right")
+        tk.Label(pad, text=T("Сайты выбранной страны (банки, госуслуги, местные сервисы) открываются напрямую, без VPN, всё остальное идёт "
+                             "через VPN. Страну можно поменять потом."), font=f_s, bg=BG, fg=MUTE, justify="left", anchor="w",
+                 wraplength=P(420)).pack(fill="x", pady=(0, P(8)))
+        tk.Label(pad, text=T("Страна"), font=f_b, bg=BG, fg=INK, anchor="w").pack(fill="x")
+        box, entry = field(pad, self.query, 30, f_b)
+        box.pack(fill="x", pady=(P(4), P(6)))
+        entry.bind("<KeyRelease>", lambda e: self.refill())
+        enable_clipboard(entry)
+        frame = tk.Frame(pad, bg=INK, padx=BW(), pady=BW())
+        frame.pack(fill="x")
+        inner = tk.Frame(frame, bg=PAPER)
+        inner.pack(fill="x")
+        self.list = tk.Listbox(inner, height=9, font=f_b, bg=PAPER, fg=INK, selectbackground=INK, selectforeground=PAPER, relief="flat", bd=0,
+                               highlightthickness=0, activestyle="none", exportselection=False)
+        sb = ttk.Scrollbar(inner, orient="vertical", style="Flat.Vertical.TScrollbar", command=self.list.yview)
+        self.list.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.list.pack(side="left", fill="x", expand=True)
+        self.list.bind("<<ListboxSelect>>", lambda e: self.on_pick())
+        self.list.bind("<Double-1>", lambda e: self.close(True))
+        self.list.bind("<Return>", lambda e: self.close(True))
+        self.bind("<Return>", lambda e: self.close(True))
+        row = tk.Frame(pad, bg=BG)
+        row.pack(fill="x", pady=(P(14), 0))
+        Flat(row, T("Готово"), lambda: self.close(True), f_s, primary=True).pack(side="right")
+        if not self.first:
+            Flat(row, T("Отмена"), lambda: self.close(False), f_s).pack(side="right", padx=(0, P(8)))
+        self.refill()
+
+    def refill(self):
+        """The list for the words typed so far; the chosen country stays chosen if it is still there."""
+        none_label = T("Нигде: весь трафик через VPN")
+        rows = [(regions.NONE, none_label)] + regions.search(self.query.get())
+        if self.query.get().strip():
+            rows = [r for r in rows if r[0] != regions.NONE or self.query.get().strip().lower() in none_label.lower()]
+        self.rows = rows
+        self.list.delete(0, "end")
+        for _, n in rows:
+            self.list.insert("end", n)
+        for i, (c, _) in enumerate(rows):
+            if c == self.picked:
+                self.list.selection_set(i)
+                self.list.see(i)
+                break
+
+    def on_pick(self):
+        sel = self.list.curselection()
+        if sel:
+            self.picked = self.rows[sel[0]][0]
+
+    def relanguage(self):
+        i18n.set_language(self.lang.get())
+        self.build()
+
+    def close(self, ok):
+        if ok:
+            self.on_pick()
+            self.result = (self.lang.get(), self.picked)
+        else:
+            i18n.set_language(self.start_lang)  # nothing was chosen: the language stays what it was
+        self.destroy()
+
+
 def set_window_icon(win):
     """Windows: give the window icons at the exact sizes this display scaling uses: 16 px for the title bar and 24 px
     for the taskbar at 100 % (30 / 36 / 48 at 125 / 150 / 200 %). Tk's iconbitmap hands Windows only a 16 and a 32 px
@@ -1399,7 +1533,7 @@ def build_test_config(outs, nic=None, skip=(), xray_ports=None):
     inbounds = [{"type": "mixed", "tag": f"in{i}", "listen": "127.0.0.1", "listen_port": TEST_BASE_PORT + i} for i in live]
     rules = [{"inbound": [f"in{i}"], "outbound": outs[i]["tag"]} for i in live]
     cfg = {"log": {"level": "warn", "output": TESTLOG},
-           "dns": {"servers": [{"type": "udp", "tag": "local", "server": "77.88.8.8"}], "strategy": "ipv4_only"},
+           "dns": {"servers": [local_dns_server(LOCAL_DNS)], "strategy": "ipv4_only"},
            "inbounds": inbounds, "outbounds": outbounds + [{"type": "direct", "tag": "direct"}],
            "route": {"rules": rules, "final": "direct", "default_domain_resolver": "local"}}
     if endpoints:
@@ -1578,7 +1712,7 @@ def build_home_config(nic=None):
     """A core with one local port and a direct exit pinned to the physical adapter: whatever answers through it is this
     computer's own connection, VPN or not."""
     cfg = {"log": {"level": "warn", "output": HOMELOG},
-           "dns": {"servers": [{"type": "udp", "tag": "local", "server": "77.88.8.8"}], "strategy": "ipv4_only"},
+           "dns": {"servers": [local_dns_server(LOCAL_DNS)], "strategy": "ipv4_only"},
            "inbounds": [{"type": "mixed", "tag": "home-in", "listen": "127.0.0.1", "listen_port": HOME_PORT}],
            "outbounds": [{"type": "direct", "tag": "direct"}],
            "route": {"final": "direct", "default_domain_resolver": "local"}}
@@ -2032,6 +2166,7 @@ class App(tk.Tk):
         self.f_h, self.f_b, self.f_s = (fam, FZ(12), "bold"), (fam, FZ(11)), (fam, FZ(10))
         self.proc = None
         self.pro_win = None  # the advanced settings window, while it is open
+        self.lang_at_start = i18n.LANG
         self.mixed_active = None  # port of the local proxy of the running connection
         self._login_busy = False
         self.xray_proc = None  # the companion Xray of the running connection, if any servers need it
@@ -2081,11 +2216,22 @@ class App(tk.Tk):
                     "pro": {},  # advanced settings the user changed (window opens with a double click on «Настройки»)
                     "autostart": False,  # started at login by the system (see autostart_set)
                     "pins": [],  # servers pinned to the top of the list (their address:port)
+                    "region": "",  # the country whose sites go without the VPN ("NONE" = none do); '' = not chosen yet
+                    "lang": i18n.LANG, "setup_done": False,
                     "tray_on_close": True, "tray_hint_shown": False}
+        raw_cfg = None
         try:
-            self.cfg = merge_cfg(self.cfg, json.load(open(SETTINGS, encoding="utf-8-sig")))
+            raw_cfg = json.load(open(SETTINGS, encoding="utf-8-sig"))
+            self.cfg = merge_cfg(self.cfg, raw_cfg)
         except Exception:
             pass
+        if isinstance(raw_cfg, dict) and raw_cfg and "setup_done" not in raw_cfg:
+            # an installation from before there was a choice of language and country: Russian, Russia, nothing to ask
+            self.cfg.update(region="RU", lang="ru", setup_done=True)
+        if not regions.valid(self.cfg.get("region")):
+            self.cfg["region"] = ""
+        global LOCAL_DNS
+        LOCAL_DNS = self.pro()["dns_local"] or regions.local_dns(self.region())
         try:
             self.subs = clean_subs(json.load(open(SUBCACHE, encoding="utf-8")))
         except Exception:
@@ -2174,9 +2320,12 @@ class App(tk.Tk):
         self.tree.bind("<Double-1>", lambda e: self.toggle() if self.state == "off" else None)
 
         # routing
-        self.section(root, T("Маршрут"))
+        route_row = self.section(root, T("Маршрут"))
+        self.region_btn = Flat(route_row, self.region_button_text(), self.open_setup, self.f_s)
+        self.region_btn.pack(side="right")
         self.ru = tk.BooleanVar(value=self.cfg["ru_direct"])
-        Check(root, T("Российские сайты напрямую, без VPN"), self.ru, self.f_b).pack(anchor="w")
+        self.ru_check = Check(root, self.direct_label(), self.ru, self.f_b)
+        self.ru_check.pack(anchor="w")
         tk.Label(root, text=T("Свои домены напрямую, через пробел"), font=self.f_s, bg=BG, fg=MUTE,
                  anchor="w").pack(fill="x", pady=(P(10), P(4)))
         eb = tk.Frame(root, bg=INK, padx=BW(), pady=BW())
@@ -2227,7 +2376,7 @@ class App(tk.Tk):
             Check(self.set_box, text, var, self.f_b).pack(anchor="w", pady=(0, P(2)))
             var.trace_add("write", self.on_view_toggle)
         self.v_skip = tk.BooleanVar(value=bool(self.cfg.get("skip_home", True)))
-        Check(self.set_box, T("Автовыбор: пропускать серверы России, если я в России"), self.v_skip,
+        Check(self.set_box, T("Автовыбор: не брать серверы своей страны, если там блокируют"), self.v_skip,
               self.f_b).pack(anchor="w", pady=(0, P(2)))
         self.v_skip.trace_add("write", self.on_skip_toggle)
         self.v_tray =tk.BooleanVar(value=bool(self.cfg.get("tray_on_close", True)))
@@ -2277,6 +2426,7 @@ class App(tk.Tk):
         self._pump_id = self.after(50, self.pump)
         self.start_instance_server()
         self.after(300, self.refresh_due)
+        self.after(900, self.first_run)
         self.sync_hints()
         self.restore_window()
         self.apply_live()
@@ -2625,7 +2775,7 @@ class App(tk.Tk):
         (and the user has not switched this off in the settings)."""
         if not self.cfg.get("skip_home", True):
             return None
-        return self.home_cc if self.home_cc in NO_BYPASS else None
+        return self.home_cc if regions.blocks(self.home_cc) else None
 
     def on_skip_toggle(self, *a):
         self.cfg["skip_home"] = self.v_skip.get()
@@ -2919,16 +3069,17 @@ class App(tk.Tk):
     def update_rules_due(self):
         """Weekly refresh of the RU lists, downloaded through the tunnel while connected."""
         now = time.time()
-        if (self.rules_busy or self.state != "on" or not self.ru.get() or now - self.t0 < 20
+        if (self.rules_busy or self.state != "on" or not self.ru.get() or self.region() == regions.NONE or now - self.t0 < 20
                 or now - self.cfg.get("rules_ok", 0) < RULES_EVERY
                 or now - self.cfg.get("rules_try", 0) < RULES_RETRY):
             return
         self.rules_busy = True
         self.cfg["rules_try"] = now
+        region = self.region()
 
         def work():
             try:
-                n = update_rule_sets(MIXED_PORT)
+                n = update_rule_sets(MIXED_PORT, region)
             except Exception:
                 n = 0
             self._ui(lambda: self.rules_done(n))
@@ -2936,9 +3087,9 @@ class App(tk.Tk):
 
     def rules_done(self, n):
         self.rules_busy = False
-        if n == len(RULE_SETS):
+        if n == len(regions.rule_sets(self.region())):
             self.cfg["rules_ok"] = time.time()
-            self.say(T("Списки российских сайтов обновлены."))
+            self.say(T("Списки сайтов страны обновлены. Они заработают при следующем подключении."))
         self.save(sources=False)
 
     # ----- speed test -----
@@ -3185,7 +3336,7 @@ class App(tk.Tk):
             hint = (T("«Быстрейший из списка» сам выберет лучший по отклику и будет переключаться. "
                     "Чтобы подключаться только к одному серверу, выбери его в списке."))
         if passed:
-            hint += T(" Серые серверы (выход в России) «Быстрейший из списка» не берёт: через них блокировки не обойти.")
+            hint += T(" Серые серверы (выход в {0}) «Быстрейший из списка» не берёт: через них блокировки не обойти.").format(regions.name(self.home_cc) or self.home_cc)
         self.say(f"{head}{src}{note} {hint}".strip())
 
     def is_pinned(self, i):
@@ -3336,7 +3487,7 @@ class App(tk.Tk):
                 return False, T("нет серверов, которые можно запустить"), " ".join(notes)
 
         def write():
-            write_json(RUNCFG, build_config(outs, chosen, self.ru.get(), extra, self.api, pool, mixed, pro, xports))
+            write_json(RUNCFG, build_config(outs, chosen, self.ru.get(), extra, self.api, pool, mixed, pro, xports, self.region()))
         write()
         ok, msg = core_check(RUNCFG)
         for step in ("rules", "servers", "pro"):  # what may be to blame, most likely first
@@ -3347,7 +3498,7 @@ class App(tk.Tk):
                     continue
                 drop_downloaded_rules()
                 self.cfg["rules_ok"] = 0  # fetch a fresh copy at the next chance
-                notes.append(T("Список российских сайтов был повреждён, взял встроенный."))
+                notes.append(T("Список сайтов страны был повреждён, взял встроенный."))
             elif step == "servers":
                 self.say(T("Проверяю серверы по одному…"))
                 self.update_idletasks()
@@ -3375,6 +3526,53 @@ class App(tk.Tk):
     def stop_xray(self):
         stop_proc(getattr(self, "xray_proc", None))
         self.xray_proc = None
+
+    def region(self):
+        """The country whose sites go without the VPN ('NONE' when none, or not chosen yet)."""
+        r = self.cfg.get("region")
+        return r if r in regions.NAMES else regions.NONE
+
+    def open_setup(self, first=False):
+        """Language and country. A new country takes effect at once (its lists are fetched in the background); a new language
+        needs the program to start again."""
+        suggest = self.home_cc or regions.system_country()
+        res = SetupDialog(self, self.cfg.get("region") or "", first, suggest).result
+        if not res:
+            return
+        lang, region = res
+        old_region = self.cfg.get("region")
+        self.cfg.update(region=region, lang=lang, setup_done=True)
+        global LOCAL_DNS
+        LOCAL_DNS = self.pro()["dns_local"] or regions.local_dns(self.region())
+        self.ru_check.lbl.config(text=self.direct_label())
+        self.region_btn.config(text=self.region_button_text())
+        if region != old_region:
+            self.cfg["rules_ok"] = 0  # the lists of the new country are fetched at the first chance
+            if region != regions.NONE:
+                threading.Thread(target=lambda: update_rule_sets(None, region), daemon=True).start()
+            if self.state == "on":
+                self.say(T("Страна изменена. Новые правила заработают при следующем подключении."))
+        self.save(sources=False)
+        if lang != self.lang_at_start:
+            self.restart()
+
+    def first_run(self):
+        """A new installation asks for the language and the country once."""
+        if not self.cfg.get("setup_done") and not self.quitting:
+            self.open_setup(first=True)
+
+    def region_button_text(self):
+        r = self.region()
+        return T("Страна: {0}").format(regions.name(r) if r != regions.NONE else T("не выбрана"))
+
+    def direct_label(self):
+        """The text of the checkbox: 'Russian sites' for Russia, 'sites of <country>' for every other."""
+        r = self.region()
+        if r == "RU":
+            return T("Российские сайты напрямую, без VPN")
+        if r == regions.NONE:
+            return T("Сайты своей страны напрямую, без VPN (выбери страну)")
+        return T("Сайты страны «{0}» напрямую, без VPN").format(regions.name(r))
 
     def pro(self):
         """The advanced settings in force (defaults where the user changed nothing or typed something unusable)."""
@@ -3424,7 +3622,7 @@ class App(tk.Tk):
 
     def restart(self):
         """Start this program again (the look is read at start). The VPN is off for the moment."""
-        if self.state != "off" and not ask_yes_no(self, T("Чтобы применить оформление, программа перезапустится. VPN на это "
+        if self.state != "off" and not ask_yes_no(self, T("Чтобы применить изменения, программа перезапустится. VPN на это "
                                                   "время выключится, потом его можно включить снова.\n\nПерезапустить?"),
                                                   T("Перезапустить"), T("Не сейчас")):
             return
@@ -3894,6 +4092,9 @@ if __name__ == "__main__":
         outs = parse_text(sys.stdin.read())
         json.dump(build_config(outs, "AUTO", True, ["example.com"]), open(RUNCFG, "w"), indent=1)
         print(len(outs), "outbounds")
+        if len(i18n.catalog("en")) < 250:  # a packaged program that lost its English texts would show Russian to everyone
+            print("the English texts are missing from this build")
+            sys.exit(1)
         sys.exit(0)
     if "--tray-selftest" in sys.argv:
         print(tray.selftest())

@@ -29,6 +29,8 @@ vpn.kill_stale_cores = lambda *a, **k: 0  # never touch the real running core in
 vpn.detect_home = lambda *a, **k: None  # nor start a real core to ask which country the machine is in
 vpn.PRO_FIELDS["merge_subs"] = (False, "bool", None)  # this suite counts requests per User-Agent: one answer per subscription (merging has its own test)
 vpn.PRO_DEFAULTS["merge_subs"] = False
+# an installation of the Russian-only days: Russian, Russia, nothing to ask (a new one would open the welcome dialog)
+json.dump({"region": "RU", "lang": "ru", "setup_done": True}, open(vpn.SETTINGS, "w", encoding="utf-8"))
 
 fails = []
 
@@ -158,8 +160,10 @@ check("ru_direct off: no rule-sets", "rule_set" not in cfg_off["route"]
       and not any("rule_set" in r for r in cfg_off["dns"]["rules"]))
 
 # ---------------- RU-list updater through a "proxy" ----------------
-vpn.RULE_SETS = {"geosite-ru": ("http://example.test/bad-geosite.srs", "http://example.test/geosite.srs"),
-                 "geoip-ru": ("http://example.test/geoip.srs",)}
+FAKE_RULE_SETS = {"geosite-ru": ("http://example.test/bad-geosite.srs", "http://example.test/geosite.srs"),
+                  "geoip-ru": ("http://example.test/geoip.srs",)}
+real_rule_sets = vpn.regions.rule_sets
+vpn.regions.rule_sets = lambda cc: FAKE_RULE_SETS if cc == "RU" else real_rule_sets(cc)
 n = vpn.update_rule_sets(PORT)  # our fake server answers absolute-URI GETs like an HTTP proxy
 check("update_rule_sets downloads both (falls back past a non-SRS answer)", n == 2, n)
 check("downloaded copy wins", vpn.rule_path("geosite-ru") == os.path.join(vpn.RULES_DIR, "geosite-ru.srs"))

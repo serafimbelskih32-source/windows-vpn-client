@@ -1,21 +1,21 @@
-name: Идея или пожелание
-description: Чего не хватает в программе
+name: Idea or wish / Идея или пожелание
+description: What is missing in the program / Чего не хватает в программе
 labels: ["enhancement"]
 body:
   - type: textarea
     id: idea
     attributes:
-      label: Что добавить или изменить
-      description: Опиши, что хочется, и зачем это нужно.
+      label: What to add or change / Что добавить или изменить
+      description: Describe what you want and why you need it (English or Russian). / Опиши, что хочется, и зачем это нужно (по-английски или по-русски).
     validations:
       required: true
   - type: dropdown
     id: os
     attributes:
-      label: Для какой системы
+      label: For which system / Для какой системы
       multiple: true
       options:
         - Windows
         - Linux
         - macOS
-        - Для всех
+        - All / Для всех

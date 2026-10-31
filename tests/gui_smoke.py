@@ -13,6 +13,7 @@ try:
     vpn.detect_home = lambda *a, **k: None  # no throw-away core asking which country the CI machine is in
     vpn.kill_stale_cores = lambda *a, **k: 0  # starting the window closes our leftover cores: never a developer's live VPN
 
+    vpn.App.first_run = lambda self: None  # the welcome dialog of a new installation is not what is checked here
     app = vpn.App()
     app.update()
     assert app.power.winfo_width() > 100, "main button has no size"

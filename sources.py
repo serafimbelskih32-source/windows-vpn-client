@@ -7,6 +7,7 @@ import re
 from collections import Counter
 from urllib.parse import parse_qs, unquote, urlparse
 
+import i18n
 from i18n import T
 
 try:
@@ -926,7 +927,10 @@ def skipped_note(skipped):
         return ""
     n = sum(skipped.values())
     parts = ", ".join(f"{WHY.get(k, k)}: {v}" for k, v in skipped.most_common())
-    word = T("сервер") if n % 10 == 1 and n % 100 != 11 else T("сервера") if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else T("серверов")
+    if i18n.LANG == "ru":
+        word = T("сервер") if n % 10 == 1 and n % 100 != 11 else T("сервера") if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else T("серверов")
+    else:  # most languages have only "one" and "many"
+        word = T("сервер") if n == 1 else T("сервера")
     return T("Пропущено {0} {1}, которые программа не умеет запускать ({2}).").format(n, word, parts)
 
 

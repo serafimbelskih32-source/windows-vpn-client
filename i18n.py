@@ -10,6 +10,8 @@ import os
 import subprocess
 import sys
 
+import i18n_en  # noqa: F401  a plain import, so that PyInstaller bundles the catalog (catalog() finds modules by name)
+
 LANGS = {"ru": "Русский", "en": "English"}  # each in its own language
 LANG = "ru"
 _catalogs = {}
