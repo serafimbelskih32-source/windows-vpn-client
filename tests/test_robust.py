@@ -138,6 +138,23 @@ vpn.drop_downloaded_rules()
 check("a damaged downloaded rule list is removed, other files stay", sorted(os.listdir(vpn.RULES_DIR)) == ["keep.txt"], os.listdir(vpn.RULES_DIR))
 check("... and the bundled lists take over", vpn.rule_path("geosite-ru") is None or vpn.rule_path("geosite-ru").startswith(vpn.CORE_DIR))
 
+# ---------- advanced settings ----------
+got, errs = vpn.clean_pro({"mixed_port": "8080", "auto_interval": 5, "dns_remote": "dns.google", "dns_local": "9.9.9.9",
+                           "auto_url": "http://probe.example/ping", "test_secs": " 7 ", "log_level": "warn", "tun_stack": "system",
+                           "strict_route": False, "auto_reconnect": False})
+check("pro: good values pass (strings of digits become numbers)", not errs and got["mixed_port"] == 8080 and got["test_secs"] == 7
+      and got["log_level"] == "warn" and got["strict_route"] is False and got["auto_reconnect"] is False, (got, errs))
+for key, bad in (("mixed_port", "80"), ("mixed_port", "70000"), ("mixed_port", "abc"), ("mixed_port", True), ("mixed_port", 3.5),
+                 ("auto_interval", 0), ("auto_tolerance", -1), ("test_top", 51), ("test_parallel", 17), ("test_secs", 31),
+                 ("tun_stack", "tap"), ("log_level", "trace"), ("strict_route", "yes"), ("auto_reconnect", 1),
+                 ("dns_remote", "not a host"), ("dns_remote", "999.1.1.1"), ("dns_local", "http://x"), ("dns_local", ""),
+                 ("auto_url", "ftp://x.example"), ("auto_url", "https://"), ("auto_url", "https://a b"), ("auto_url", "https://x/" + "a" * 300)):
+    v, e = vpn.clean_pro({key: bad})
+    check(f"pro: {key}={bad!r} is refused and the default stays", key in e and v[key] == vpn.PRO_DEFAULTS[key], (v[key], e))
+check("pro: junk instead of a dict gives the defaults", all(vpn.clean_pro(x) == (vpn.PRO_DEFAULTS, {}) for x in (None, 5, "x", [1])))
+check("pro: unknown keys are ignored", vpn.clean_pro({"nonsense": 1}) == (vpn.PRO_DEFAULTS, {}))
+check("pro: every default is itself valid", vpn.clean_pro(vpn.PRO_DEFAULTS) == (vpn.PRO_DEFAULTS, {}))
+
 # ---------- a subscription may not be endless ----------
 class Resp:
     headers = {}

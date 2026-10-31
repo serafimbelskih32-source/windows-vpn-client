@@ -511,17 +511,109 @@ def merge_outs(groups):
     return res
 
 
+RELEASES_URL = f"https://github.com/{updater.REPO}/releases/latest"
+MSG_NO_CORE = ("Не хватает файла, без которого VPN не работает.\n\nТак бывает, когда антивирус удаляет его по ошибке. "
+               "Что сделать:\n1. Добавь программу в исключения антивируса.\n2. Скачай программу заново и запусти её.\n\n"
+               "Если не получится, напиши об этом на странице проекта на GitHub.")
+
+
+# ---------- advanced ("pro") settings ----------
+# Everything an ordinary user never needs. The defaults are what the program always did; the window for these settings
+# opens with a double click on «Настройки». Each entry: default, kind, bounds / choices, label for the window.
+PRO_FIELDS = {
+    "mixed_port": (2080, "int", (1024, 65535)),
+    "tun_stack": ("mixed", "choice", ("mixed", "system", "gvisor")),
+    "strict_route": (True, "bool", None),
+    "auto_reconnect": (True, "bool", None),
+    "dns_remote": ("1.1.1.1", "host", None),
+    "dns_local": ("77.88.8.8", "host", None),
+    "auto_url": ("https://www.gstatic.com/generate_204", "url", None),
+    "auto_interval": (3, "int", (1, 60)),
+    "auto_tolerance": (50, "int", (0, 1000)),
+    "test_top": (8, "int", (1, 50)),
+    "test_secs": (4, "int", (1, 30)),
+    "test_parallel": (8, "int", (1, 16)),
+    "log_level": ("info", "choice", ("debug", "info", "warn", "error")),
+}
+PRO_DEFAULTS = {k: v[0] for k, v in PRO_FIELDS.items()}
+_HOST = re.compile(r"^(\d{1,3}(\.\d{1,3}){3}|[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+)$")
+
+
+def clean_pro(raw):
+    """Advanced settings made safe: (values, errors). A missing or wrong value falls back to its default and, when the
+    user typed it, is named in `errors` ({key: what is wrong}) so the window can point at it."""
+    out, errors = dict(PRO_DEFAULTS), {}
+    if not isinstance(raw, dict):
+        return out, errors
+    for k, (default, kind, rule) in PRO_FIELDS.items():
+        if k not in raw:
+            continue
+        v = raw[k]
+        try:
+            if kind == "bool":
+                if not isinstance(v, bool):
+                    raise ValueError("нужно «да» или «нет»")
+            elif kind == "int":
+                if isinstance(v, bool) or not isinstance(v, (int, str)) or (isinstance(v, str) and not v.strip().lstrip("-").isdigit()):
+                    raise ValueError("нужно целое число")
+                v = int(v)
+                if not rule[0] <= v <= rule[1]:
+                    raise ValueError(f"число от {rule[0]} до {rule[1]}")
+            elif kind == "choice":
+                if v not in rule:
+                    raise ValueError("такого варианта нет")
+            elif kind == "host":
+                v = str(v).strip()
+                if not _HOST.match(v) or any(int(p) > 255 for p in v.split(".") if v.replace(".", "").isdigit()):
+                    raise ValueError("нужен адрес вида 1.1.1.1 или dns.google")
+            elif kind == "url":
+                v = str(v).strip()
+                if not re.match(r"^https?://[^\s/]+(/\S*)?$", v) or len(v) > 200:
+                    raise ValueError("нужен адрес вида https://…")
+            out[k] = v
+        except ValueError as e:
+            errors[k] = str(e)
+    return out, errors
+
+
+def strip_ansi(text):
+    """The core colours its messages with terminal codes; in a dialog they show up as garbage."""
+    return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text or "")
+
+
+def open_path(path):
+    """Open a file or folder with whatever the system uses for it. False if that did not work."""
+    try:
+        if IS_WIN:
+            os.startfile(path)  # noqa: S606
+        else:
+            subprocess.Popen(["open" if IS_MAC else "xdg-open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def open_url(url):
+    try:
+        import webbrowser
+        return bool(webbrowser.open(url))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # ---------- config build ----------
-def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None, mixed_port=None):
+def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None, mixed_port=None, pro=None):
     """`api` = (port, secret): expose the core's local API so the window can show which server auto mode picked.
-    `auto_tags`: the servers «Быстрейший из списка» may choose from (default: all); a hand-picked server is always allowed."""
+    `auto_tags`: the servers «Быстрейший из списка» may choose from (default: all); a hand-picked server is always allowed.
+    `pro`: advanced settings (see PRO_FIELDS); missing or wrong values mean the defaults."""
     if not outs:
         raise ValueError("нет серверов")
+    pro = clean_pro(pro)[0]
     tags = [o["tag"] for o in outs]
     proxy_out = {"type": "selector", "tag": "proxy", "outbounds": tags, "default": chosen if chosen in tags else tags[0]}
     if chosen == "AUTO" and len(tags) > 1:
         proxy_out = {"type": "urltest", "tag": "proxy", "outbounds": [t for t in (auto_tags or tags) if t in tags] or tags,
-                     "url": "https://www.gstatic.com/generate_204", "interval": "3m"}
+                     "url": pro["auto_url"], "interval": f"{pro['auto_interval']}m", "tolerance": pro["auto_tolerance"]}
     domains = list(extra_direct)
     rules = [
         {"action": "sniff"},
@@ -550,15 +642,15 @@ def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None
     if srv:
         dns_rules.insert(0, {"domain": srv, "server": "local"})
     cfg = {
-        "log": {"level": "info", "timestamp": True, "output": LOGFILE},
-        "dns": {"servers": [{"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "proxy"},
-                            {"type": "udp", "tag": "local", "server": "77.88.8.8"}],
+        "log": {"level": pro["log_level"], "timestamp": True, "output": LOGFILE},
+        "dns": {"servers": [{"type": "https", "tag": "remote", "server": pro["dns_remote"], "detour": "proxy"},
+                            {"type": "udp", "tag": "local", "server": pro["dns_local"]}],
                 "rules": dns_rules, "final": "remote", "strategy": "ipv4_only"},
         "inbounds": [
             dict({"type": "tun", "tag": "tun-in", "address": ["172.19.0.1/30"], "auto_route": True,
-                  "strict_route": True, "stack": "mixed"},
+                  "strict_route": pro["strict_route"], "stack": pro["tun_stack"]},
                  **({} if IS_MAC else {"interface_name": TUN_NAME})),  # macOS names must be utunN: let the core pick
-            {"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": mixed_port or MIXED_PORT},
+            {"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": mixed_port or pro["mixed_port"]},
         ],
         "outbounds": outs + [proxy_out, {"type": "direct", "tag": "direct"}],
         "route": {"rules": rules, "rule_set": rule_sets, "final": "proxy", "auto_detect_interface": True,
@@ -771,6 +863,202 @@ def ask_yes_no(parent, text, yes="Да", no="Нет"):
     return Dialog(parent, text, [yes, no], "question", 0, 1).result == 0
 
 
+class Segmented(tk.Frame):
+    """A row of hard-edged options of which one is selected (blue). Reads and writes a StringVar."""
+    def __init__(self, master, options, var, font):
+        super().__init__(master, bg=BG)
+        self.var, self.buttons = var, {}
+        for o in options:
+            b = tk.Label(self, text=o, font=font, padx=P(10), pady=P(3), cursor="hand2", bd=0,
+                         highlightthickness=P(2), highlightbackground=INK)
+            b.pack(side="left")
+            b.bind("<Button-1>", lambda e, o=o: var.set(o))
+            self.buttons[o] = b
+        var.trace_add("write", lambda *a: self.paint())
+        self.paint()
+
+    def paint(self):
+        for o, b in self.buttons.items():
+            on = self.var.get() == o
+            b.config(bg=BLUE if on else PAPER, fg=WHITE if on else INK)
+
+
+# (key, label, widget, hint) per section of the advanced settings window; the order here is the order on screen
+PRO_LAYOUT = (
+    ("Соединение", (
+        ("mixed_port", "Порт локального прокси", "entry", "Для программ, которым нужен адрес прокси: 127.0.0.1 и этот порт."),
+        ("tun_stack", "Режим сетевого адаптера", "choice", "Если сайты не открываются или тормозят, попробуй system или gvisor."),
+        ("strict_route", "Не пускать трафик в обход VPN", "check", None),
+        ("auto_reconnect", "Подключаться заново, если соединение оборвалось", "check", None),
+    )),
+    ("DNS", (
+        ("dns_remote", "DNS через VPN", "entry", "Адрес или имя DNS-сервера для обычных сайтов."),
+        ("dns_local", "DNS для российских сайтов", "entry", "Работает мимо VPN, когда включено «Российские сайты напрямую»."),
+    )),
+    ("Быстрейший из списка", (
+        ("auto_url", "Адрес для проверки отклика", "entry", None),
+        ("auto_interval", "Проверять каждые, минут", "entry", None),
+        ("auto_tolerance", "Менять сервер, если другой лучше на, мс", "entry", "Больше число: реже переключений."),
+    )),
+    ("Тест скорости", (
+        ("test_top", "У скольких лучших по пингу мерить скорость", "entry", None),
+        ("test_secs", "Секунд на каждый сервер", "entry", None),
+        ("test_parallel", "Сколько серверов проверять одновременно", "entry", None),
+    )),
+    ("Журнал", (
+        ("log_level", "Подробность журнала ядра", "choice", "debug пишет всё подряд, error только ошибки."),
+    )),
+)
+
+
+class ProWindow(tk.Toplevel):
+    """The advanced settings, in a window of their own: it opens with a double click on «Настройки». Nothing here is
+    needed by an ordinary user; a value that does not fit is pointed at and not saved, and a value the core cannot
+    work with never stops a connection (prepare_config falls back to the defaults)."""
+    def __init__(self, app):
+        super().__init__(app)
+        self.app = app
+        self.title(TITLE + " · расширенные настройки")
+        self.configure(bg=BG)
+        try:
+            if IS_WIN:
+                self.iconbitmap(os.path.join(BASE, "icon.ico"))
+        except Exception:  # noqa: BLE001
+            pass
+        set_window_icon(self)
+        f_b, f_s, f_h, fam = app.f_b, app.f_s, app.f_h, app.fam
+        self.f_b = f_b
+        self.vars, self.boxes, self.labels = {}, {}, {}
+        cur = app.pro()
+
+        # the form scrolls (small screens), the buttons below it do not
+        outer = tk.Frame(self, bg=BG)
+        outer.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(outer, bg=BG, highlightthickness=0, bd=0)
+        self.sb = ttk.Scrollbar(outer, orient="vertical", style="Flat.Vertical.TScrollbar", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.sb.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        body = tk.Frame(self.canvas, bg=BG)
+        win = self.canvas.create_window((0, 0), window=body, anchor="nw")
+        body.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(win, width=e.width))
+        pad = tk.Frame(body, bg=BG)
+        pad.pack(fill="both", expand=True, padx=P(22), pady=P(18))
+
+        tk.Label(pad, text="Расширенные настройки", font=f_h, bg=BG, fg=INK).pack(anchor="w")
+        tk.Label(pad, text="Для опытных пользователей. Обычно здесь ничего менять не нужно. Если значение не подойдёт, "
+                           "программа вернёт обычное и всё равно подключится.", font=f_s, bg=BG, fg=MUTE, wraplength=P(500),
+                 justify="left", anchor="w").pack(anchor="w", pady=(P(4), 0))
+        for title, rows in PRO_LAYOUT:
+            tk.Label(pad, text=title, font=f_h, bg=BG, fg=INK).pack(anchor="w", pady=(P(18), P(6)))
+            for key, label, kind, hint in rows:
+                self.add_row(pad, key, label, kind, hint, cur[key], fam)
+
+        # fixed footer
+        self.msg = tk.Label(self, text="", font=f_s, bg=BG, fg=MUTE, anchor="w", justify="left", wraplength=P(500))
+        self.msg.pack(fill="x", padx=P(22), pady=(P(8), 0))
+        foot = tk.Frame(self, bg=BG)
+        foot.pack(fill="x", padx=P(22), pady=P(14))
+        Flat(foot, "Закрыть", self.close, f_s).pack(side="right")
+        Flat(foot, "Применить", self.apply, f_s, primary=True).pack(side="right", padx=(0, P(8)))
+        Flat(foot, "По умолчанию", self.reset, f_s).pack(side="left")
+        Flat(foot, "Папка данных", lambda: self.tool(DATA), f_s).pack(side="left", padx=(P(8), 0))
+        Flat(foot, "Журнал", lambda: self.tool(LOGFILE), f_s).pack(side="left", padx=(P(8), 0))
+
+        self.bind("<Escape>", lambda e: self.close())
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        self.update_idletasks()
+        w = P(580)
+        need = body.winfo_reqheight() + self.msg.winfo_reqheight() + foot.winfo_reqheight() + P(30)
+        h = min(need, max(P(420), self.winfo_screenheight() - P(160)))
+        if need > h:  # does not fit the screen: scroll
+            self.sb.pack(side="right", fill="y")
+            for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                self.bind(ev, self.on_wheel)
+        x = app.winfo_rootx() + app.winfo_width() + P(12)
+        if x + w > self.winfo_screenwidth():
+            x = max(0, app.winfo_rootx() + P(40))
+        y = max(0, min(app.winfo_rooty(), self.winfo_screenheight() - h - P(80)))
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.minsize(P(480), P(360))
+        self.focus_force()
+
+    def on_wheel(self, e):
+        step = -1 if (getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0) else 1
+        self.canvas.yview_scroll(step * 2, "units")
+
+    def add_row(self, parent, key, label, kind, hint, value, fam):
+        f_b, f_s = self.app.f_b, self.app.f_s
+        row = tk.Frame(parent, bg=BG)
+        row.pack(fill="x", pady=(0, P(6)))
+        if kind == "check":
+            var = tk.BooleanVar(value=bool(value))
+            Check(row, label, var, f_b).pack(anchor="w")
+        else:
+            wide = key == "auto_url"  # the address needs the whole width: label above it; the rest sit beside their label
+            line = tk.Frame(row, bg=BG)
+            line.pack(fill="x")
+            lab = tk.Label(line, text=label, font=f_b, bg=BG, fg=INK, anchor="w", justify="left", wraplength=P(330 if not wide else 500))
+            lab.pack(fill="x") if wide else lab.pack(side="left")
+            self.labels[key] = lab
+            var = tk.StringVar(value=str(value))
+            if kind == "choice":
+                Segmented(line, PRO_FIELDS[key][2], var, f_b).pack(side="right")
+            else:
+                box = tk.Frame(line, bg=INK, padx=P(2), pady=P(2))
+                box.pack(fill="x", pady=(P(3), 0)) if wide else box.pack(side="right")
+                e = tk.Entry(box, textvariable=var, width=50 if key == "auto_url" else 14, font=f_b, bg=PAPER, fg=INK,
+                             relief="flat", bd=0, highlightthickness=0, insertbackground=INK, selectbackground=BLUE,
+                             selectforeground=WHITE)
+                e.pack(fill="x", ipady=P(3), padx=P(5))
+                e.bind("<Return>", lambda ev: self.apply())
+                enable_clipboard(e)
+                self.boxes[key] = box
+                var.trace_add("write", lambda *a, k=key: self.boxes[k].config(bg=INK))
+        if hint:
+            tk.Label(row, text=hint, font=f_s, bg=BG, fg=MUTE, anchor="w", justify="left", wraplength=P(500)).pack(fill="x", pady=(P(2), 0))
+        self.vars[key] = var
+
+    def values(self):
+        return {k: v.get() for k, v in self.vars.items()}
+
+    def apply(self):
+        raw = self.values()
+        clean, errors = clean_pro(raw)
+        for k, box in self.boxes.items():
+            box.config(bg=RED if k in errors else INK)
+        if errors:
+            k = next(iter(errors))
+            label = self.labels[k].cget("text") if k in self.labels else k
+            self.msg.config(text=f"Не сохранено. {label}: {errors[k]}.", fg=RED)
+            return False
+        self.app.cfg["pro"] = {k: v for k, v in clean.items() if v != PRO_DEFAULTS[k]}  # only what differs from the defaults
+        self.app.save(sources=False)
+        for k, var in self.vars.items():
+            var.set(clean[k] if isinstance(var, tk.BooleanVar) else str(clean[k]))
+        note = "Сохранено."
+        if self.app.state != "off":
+            note += " Изменения заработают при следующем подключении."
+            self.app.say("Расширенные настройки сохранены. Они заработают при следующем подключении.")
+        self.msg.config(text=note, fg=MUTE)
+        return True
+
+    def reset(self):
+        for k, var in self.vars.items():
+            var.set(PRO_DEFAULTS[k] if isinstance(var, tk.BooleanVar) else str(PRO_DEFAULTS[k]))
+        self.msg.config(text="Поля вернулись к обычным значениям. Нажми «Применить», чтобы сохранить.", fg=MUTE)
+
+    def tool(self, path):
+        if os.path.exists(path) and open_path(path):
+            return
+        self.msg.config(text="Этого файла ещё нет: он появится после первого подключения." if path == LOGFILE
+                        else "Не получилось открыть.", fg=RED)
+
+    def close(self):
+        self.app.pro_win = None
+        self.destroy()
+
+
 def set_window_icon(win):
     """Windows: give the window icons at the exact sizes this display scaling uses: 16 px for the title bar and 24 px
     for the taskbar at 100 % (30 / 36 / 48 at 125 / 150 / 200 %). Tk's iconbitmap hands Windows only a 16 and a 32 px
@@ -909,6 +1197,7 @@ TOP_FOR_SPEED = 8
 
 
 TUN_NAME = "FimaTUN"
+DOUBLE_CLICK_MS = 250  # how long a single click on «Настройки» waits for a possible second one
 
 
 def build_test_config(outs, nic=None, skip=()):
@@ -933,7 +1222,7 @@ def core_check(cfg_path):
         chk = subprocess.run([CORE, "check", "-c", cfg_path], capture_output=True, text=True, creationflags=NOWIN, timeout=60)
     except (OSError, subprocess.SubprocessError) as e:  # core missing (antivirus), blocked, hung
         return False, f"ядро не запускается: {e}"
-    return chk.returncode == 0, (chk.stderr or chk.stdout).strip()
+    return chk.returncode == 0, strip_ansi(chk.stderr or chk.stdout).strip()
 
 
 def drop_downloaded_rules():
@@ -1362,7 +1651,8 @@ class App(tk.Tk):
                 return
             self._last_err = time.time()
             try:
-                show_error(self, "Ошибка: " + str(a[1]) + "\nПодробности: " + os.path.join(DATA, "crash.log"))
+                show_error(self, "Что-то пошло не так, но программа продолжает работать.\n\nЕсли это повторяется, пришли "
+                                 "файл crash.log из папки:\n" + DATA + "\n\nТехническая причина: " + str(a[1])[:200])
             except Exception:  # noqa: BLE001
                 pass
         self.report_callback_exception = on_error
@@ -1384,6 +1674,7 @@ class App(tk.Tk):
         self.fam = fam
         self.f_h, self.f_b, self.f_s = (fam, FZ(12), "bold"), (fam, FZ(11)), (fam, FZ(10))
         self.proc = None
+        self.pro_win = None  # the advanced settings window, while it is open
         self.test_proc = None
         self.test_skip = set()  # rows of the server list the core refused in the last test
         self.restarts = []  # when the connection was brought back after the core stopped on its own
@@ -1426,6 +1717,7 @@ class App(tk.Tk):
                     "auto_update": None,  # None = not asked yet
                     "show_flags": True, "show_ping": True, "show_speed": True,
                     "skip_home": True,  # auto mode passes over servers that exit in the user's own blocking country
+                    "pro": {},  # advanced settings the user changed (window opens with a double click on «Настройки»)
                     "tray_on_close": True, "tray_hint_shown": False}
         try:
             self.cfg = merge_cfg(self.cfg, json.load(open(SETTINGS, encoding="utf-8-sig")))
@@ -1557,13 +1849,15 @@ class App(tk.Tk):
         self.upd_btn = Flat(urow, "Проверить", self.on_upd_click, self.f_s)
         self.upd_btn.pack(side="right")
         self.upd_var.trace_add("write", self.on_upd_toggle)
+        tk.Label(self.set_box, text="Для опытных: двойной щелчок по «Настройки» открывает расширенные настройки.",
+                 font=self.f_s, bg=BG, fg=MUTE, anchor="w", justify="left", wraplength=P(430)).pack(fill="x", pady=(P(8), 0))
 
         # footer: deliberately quiet. Small grey links; the version on the right.
         self.foot = tk.Frame(root, bg=BG)
         self.foot.pack(fill="x", pady=(P(14), 0))
         self.log_head = self.quiet_link(self.foot, "Лог", self.toggle_log)
         self.log_head.pack(side="left")
-        self.set_head = self.quiet_link(self.foot, "Настройки", self.toggle_settings)
+        self.set_head = self.quiet_link(self.foot, "Настройки", self.toggle_settings, double=self.open_pro)
         self.set_head.pack(side="left", padx=(P(16), 0))
         tk.Label(self.foot, text=f"v{updater.VERSION}", font=self.f_s, bg=BG, fg=MUTE).pack(side="right")
 
@@ -1578,7 +1872,7 @@ class App(tk.Tk):
             try:
                 n = kill_stale_cores({p.pid for p in (self.proc, self.test_proc) if p})
                 if n:
-                    self._ui(lambda: self.say("Закрыл зависшее ядро VPN от прошлого запуска."))
+                    self._ui(lambda: self.say("Закрыл остатки прошлого запуска VPN."))
             finally:
                 self.clean_done.set()
         threading.Thread(target=clean, daemon=True).start()
@@ -1645,7 +1939,7 @@ class App(tk.Tk):
     def update_done(self, upd, got, err, manual):
         self.upd_busy = False
         if err:
-            return self.say(f"Не удалось проверить обновления: {err}", err=True) if manual else None
+            return self.say("Не удалось проверить обновления. Проверь интернет и попробуй позже.", err=True) if manual else None
         if not upd:
             return self.say(f"Установлена последняя версия ({updater.VERSION}).") if manual else None
         self.pending = got
@@ -1680,8 +1974,10 @@ class App(tk.Tk):
         tk.Label(row, text=title, font=self.f_h, bg=BG, fg=INK).pack(side="left")
         return row
 
-    def quiet_link(self, parent, text, command):
-        """A small grey text link: dark and underlined only while hovered or while its panel is open."""
+    def quiet_link(self, parent, text, command, double=None):
+        """A small grey text link: dark and underlined only while hovered or while its panel is open.
+        With `double`, a double click does that instead; the single click then waits a moment to see whether a second
+        one follows, so the panel does not flicker open and shut."""
         base, lit = (self.fam, FZ(10)), (self.fam, FZ(10), "underline")
         lbl = tk.Label(parent, text=text, font=base, bg=BG, fg=MUTE, cursor="hand2")
         lbl.base, lbl.lit, lbl.open = base, lit, False
@@ -1692,8 +1988,45 @@ class App(tk.Tk):
         lbl.paint = paint
         lbl.bind("<Enter>", lambda e: paint(True))
         lbl.bind("<Leave>", lambda e: paint(False))
-        lbl.bind("<Button-1>", lambda e: command())
+        if double is None:
+            lbl.bind("<Button-1>", lambda e: command())
+            return lbl
+        st = {"timer": None, "fired": False}
+
+        def single(e=None):
+            st["fired"] = False
+
+            def fire():
+                st["timer"], st["fired"] = None, True
+                command()
+            st["timer"] = lbl.after(DOUBLE_CLICK_MS, fire)
+
+        def twice(e=None):
+            if st["timer"] is not None:  # the single click has not acted yet: cancel it
+                lbl.after_cancel(st["timer"])
+                st["timer"] = None
+            elif st["fired"]:  # it already did: take that back
+                command()
+            st["fired"] = False
+            double()
+        lbl.bind("<Button-1>", single)
+        lbl.bind("<Double-Button-1>", twice)
+        lbl.single, lbl.twice = single, twice  # for tests: synthetic events do not make Tk count a double click
         return lbl
+
+    def open_pro(self):
+        """The advanced settings window (one at a time)."""
+        w = getattr(self, "pro_win", None)
+        try:
+            if w is not None and w.winfo_exists():
+                w.deiconify()
+                w.lift()
+                w.focus_force()
+                return w
+        except tk.TclError:
+            pass
+        self.pro_win = ProWindow(self)
+        return self.pro_win
 
     def toggle_log(self, force=None):
         self.log_open = (not self.log_open) if force is None else force
@@ -1968,8 +2301,9 @@ class App(tk.Tk):
             self.count.config(text="Пусто")
             self.say("Серверов нет. Проверь ссылку или ключ.", err=True)
             if manual and not silent:
-                show_error(self, "Не удалось получить серверы.\n" +
-                                     ("\n".join(errors) if errors else "Проверь ссылку или ключ."))
+                show_error(self, "Не удалось получить серверы.\n\nЧто сделать: проверь, что ссылка подписки скопирована целиком "
+                                     "(она начинается с https://) и что есть интернет, потом нажми «Обновить».\n\n" +
+                                     ("\n".join(errors) if errors else "Серверов в ответе нет."))
             return
         if manual:
             self.say("Не все подписки обновились, показаны сохранённые серверы." if errors else "", err=bool(errors))
@@ -2135,7 +2469,8 @@ class App(tk.Tk):
         _, ping_on, speed_on = plan
         n = len(outs)
         alive_i, pings, done = {}, {}, 0
-        with ThreadPoolExecutor(8) as ex:
+        pro = self.pro()
+        with ThreadPoolExecutor(pro["test_parallel"]) as ex:
             futs = {ex.submit(lambda i=i: (None, None, None) if self.test_stop.is_set() else self._probe(i, plan)): i
                     for i in range(n)}
             for f in as_completed(futs):
@@ -2149,7 +2484,7 @@ class App(tk.Tk):
         if not speed_on or self.test_stop.is_set():
             return
         if ping_on:  # the fastest by response time are the likeliest to be fast
-            top = sorted((i for i, ok in alive_i.items() if ok), key=lambda i: pings[i])[:TOP_FOR_SPEED]
+            top = sorted((i for i, ok in alive_i.items() if ok), key=lambda i: pings[i])[:pro["test_top"]]
         else:  # no ranking without ping: every server that answered
             top = sorted(i for i, ok in alive_i.items() if ok)
         urls = list(SPEED_URLS)  # one source for the whole run so servers are compared on equal terms
@@ -2158,7 +2493,7 @@ class App(tk.Tk):
             if self.test_stop.is_set():
                 break
             self._ui(lambda k=k, t=len(top): self.count.config(text=f"Скорость {k}/{t}"))
-            sp, used = probe_speed(TEST_BASE_PORT + i, urls=urls)
+            sp, used = probe_speed(TEST_BASE_PORT + i, secs=pro["test_secs"], urls=urls)
             if used:
                 urls.remove(used)
                 urls.insert(0, used)
@@ -2187,7 +2522,7 @@ class App(tk.Tk):
             if IS_LINUX and self.state == "off":
                 nic = None  # binding sockets to a device may need CAP_NET_RAW on old kernels; only do it when needed
             if not nic and self.state != "off":
-                raise RuntimeError("не нашёл сетевой адаптер для замера мимо VPN")
+                raise RuntimeError("не нашёл подключение к интернету")
             outs = resolve_servers(outs)
             self.test_skip = set()
             write_json(TESTCFG, build_test_config(outs, nic))
@@ -2200,7 +2535,7 @@ class App(tk.Tk):
                     write_json(TESTCFG, build_test_config(outs, nic, self.test_skip))
                     ok, msg = core_check(TESTCFG)
             if not ok:
-                raise RuntimeError("конфиг не прошёл проверку: " + msg[-200:])
+                raise RuntimeError("не получилось подготовить проверку серверов")
             self.test_proc = subprocess.Popen([CORE, "run", "-c", TESTCFG], cwd=DATA, creationflags=NOWIN,
                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             own(self.test_proc)
@@ -2208,13 +2543,13 @@ class App(tk.Tk):
             deadline = time.time() + 10
             while True:
                 if self.test_proc.poll() is not None:
-                    raise RuntimeError("ядро не запустилось")
+                    raise RuntimeError("проверка не запустилась (возможно, мешает антивирус)")
                 try:
                     socket.create_connection(("127.0.0.1", last), 0.3).close()
                     break
                 except OSError:
                     if time.time() > deadline:
-                        raise RuntimeError("ядро не отвечает")
+                        raise RuntimeError("проверка не ответила (возможно, мешает антивирус)")
                     time.sleep(0.2)
 
             self._probe_all(outs, plan)
@@ -2236,7 +2571,7 @@ class App(tk.Tk):
         self.test_btn.config(text=self.test_label())
         self.count.config(text=str(len(self.outs)))
         if err:
-            return self.say("Тест не удался: " + err, err=True)
+            return self.say("Проверка не получилась: " + err + ". Проверь интернет и попробуй ещё раз.", err=True)
         show_flags, show_ping, show_speed = self.v_flags.get(), self.v_ping.get(), self.v_speed.get()
 
         def res(i):
@@ -2248,7 +2583,8 @@ class App(tk.Tk):
         passed = len(alive_all) - len(alive)
         if not alive:
             asked = any(self.alive.get(o["tag"]) is not None or res(i)[0] is not None for i, o in enumerate(self.outs))
-            return self.say("Ни один сервер не ответил." if asked else "Тест остановлен до первых результатов.", err=True)
+            return self.say("Ни один сервер не ответил. Проверь интернет или обнови подписку." if asked
+                            else "Проверка остановлена до первых результатов.", err=True)
         with_speed = [i for i in alive if show_speed and res(i)[1] is not None and res(i)[1] >= 0]
         with_ping = [i for i in alive if show_ping and res(i)[0] is not None and res(i)[0] >= 0]
 
@@ -2305,8 +2641,9 @@ class App(tk.Tk):
         if self.proc and self.proc.poll() is None:
             return self.stop()
         if not is_admin():
-            self.say("Запусти приложение от имени администратора: без этого не создать сетевой адаптер.", err=True)
-            return show_error(self, "Запусти приложение от имени администратора (нужно для TUN).")
+            self.say("Нужны права администратора. Закрой программу и открой её снова от имени администратора.", err=True)
+            return show_error(self, "Для работы VPN нужны права администратора.\n\nЗакрой программу и открой её снова: нажми "
+                                    "на значок правой кнопкой и выбери «Запуск от имени администратора».")
         if not self.outs:
             return self.say("Сначала добавь подписку и нажми «Обновить».", err=True)
         if self.testing:
@@ -2317,9 +2654,10 @@ class App(tk.Tk):
                      "Два VPN сразу конфликтуют. Отключи его и нажми «Да», либо «Нет» для отмены."):
             return
         if not os.path.isfile(CORE):
-            self.say("Нет файла ядра VPN. Скорее всего, его удалил антивирус.", err=True)
-            return show_error(self, "Не найден файл ядра VPN:\n" + CORE + "\n\nСкорее всего, его удалил антивирус. "
-                                    "Добавь программу в исключения антивируса и запусти её заново (или скачай заново).")
+            self.say("Не хватает файла для работы VPN. Скорее всего, его удалил антивирус.", err=True)
+            if Dialog(self, MSG_NO_CORE, ["Скачать заново", "Закрыть"], "error", 0, 1).result == 0:
+                open_url(RELEASES_URL)
+            return
         self.api = (free_port(), secrets.token_hex(16))  # new secret per connection, loopback only
         self.current = ""
         open(LOGFILE, "w").close()
@@ -2327,13 +2665,17 @@ class App(tk.Tk):
         ok, msg, note = self.prepare_config()
         if not ok:
             self.toggle_log(True)
-            self.say("Конфиг не прошёл проверку, подробности в логе.", err=True)
-            return show_error(self, "Ошибка конфига:\n" + msg[-800:])
+            self.say("Не получилось подготовить подключение. Обнови подписку или выбери другой сервер.", err=True)
+            return show_error(self, "Не получилось подготовить подключение.\n\nЧто сделать:\n• нажми «Обновить» в разделе «Подписки» "
+                                    "и подключись снова;\n• или выбери в списке другой сервер.\n\nЕсли не помогает, открой «Лог» внизу "
+                                    "окна и пришли его текст в поддержку.\n\nТехническая причина: " + msg[-300:])
         try:
             self.proc = start_core(RUNCFG)
         except OSError as e:  # blocked by an antivirus, no rights, file locked
-            self.say("Ядро VPN не запустилось.", err=True)
-            return show_error(self, f"Не удалось запустить ядро VPN: {e}\n\nПроверь антивирус и права на папку программы.")
+            self.say("VPN не запустился. Проверь антивирус и права.", err=True)
+            return show_error(self, "VPN не смог запуститься.\n\nОбычно виноват антивирус или нехватка прав. Что сделать: добавь "
+                                    "программу в исключения антивируса, закрой её и открой снова от имени администратора.\n\n"
+                                    f"Техническая причина: {e}")
         self.active = self.sel_name()
         self.state = "connecting"
         self.t_conn = time.time()
@@ -2345,37 +2687,47 @@ class App(tk.Tk):
         a damaged downloaded rule list is dropped (the bundled copy takes over), a server whose data the core does not
         accept is left out. Returns (ok, core message, note for the user)."""
         outs, chosen, pool, extra = self.outs, self.chosen(), self.auto_pool(), clean_domains(self.extra.get())
-        mixed = pick_port(MIXED_PORT)
-        notes = [] if mixed == MIXED_PORT else [f"Порт {MIXED_PORT} занят, локальный прокси на порту {mixed}."]
+        pro = self.pro()
+        mixed = pick_port(pro["mixed_port"])
+        notes = [] if mixed == pro["mixed_port"] else [f"Порт {pro['mixed_port']} занят, локальный прокси на порту {mixed}."]
 
         def write():
-            write_json(RUNCFG, build_config(outs, chosen, self.ru.get(), extra, self.api, pool, mixed))
+            write_json(RUNCFG, build_config(outs, chosen, self.ru.get(), extra, self.api, pool, mixed, pro))
         write()
         ok, msg = core_check(RUNCFG)
-        healed = salvaged = False
-        while not ok and not (healed and salvaged):
-            if not healed and "rule-set" in msg.lower():
-                healed = True
+        for step in ("rules", "servers", "pro"):  # what may be to blame, most likely first
+            if ok:
+                break
+            if step == "rules":
+                if "rule-set" not in msg.lower():
+                    continue
                 drop_downloaded_rules()
                 self.cfg["rules_ok"] = 0  # fetch a fresh copy at the next chance
                 notes.append("Список российских сайтов был повреждён, взял встроенный.")
-            elif not salvaged:
-                salvaged = True
+            elif step == "servers":
                 self.say("Проверяю серверы по одному…")
                 self.update_idletasks()
                 good, bad = salvage_outs(outs)
                 if not (good and bad):
-                    break
+                    continue
                 names = {o["tag"] for o in good}
                 outs = good
                 chosen = chosen if chosen in names else "AUTO"
                 pool = [t for t in pool if t in names] or [o["tag"] for o in good]
                 notes.append(f"Пропущено серверов с неверными данными: {len(bad)}.")
-            else:
-                break
+            else:  # the user's advanced settings: last suspect, but a connection beats a setting
+                if pro == PRO_DEFAULTS:
+                    continue
+                pro = dict(PRO_DEFAULTS)
+                mixed = pick_port(pro["mixed_port"])
+                notes.append("Расширенные настройки не подошли, использованы обычные.")
             write()
             ok, msg = core_check(RUNCFG)
         return ok, msg, " ".join(notes)
+
+    def pro(self):
+        """The advanced settings in force (defaults where the user changed nothing or typed something unusable)."""
+        return clean_pro(self.cfg.get("pro"))[0]
 
     def may_restart(self):
         """At most 3 automatic reconnects in 10 minutes: a core that keeps dying must not loop forever."""
@@ -2390,7 +2742,7 @@ class App(tk.Tk):
         if self.state != "off" or self.quitting or self.installing:
             return
         if karing_running():
-            return self.say("Соединение оборвалось. Другой VPN-клиент включён, подключись вручную.", err=True)
+            return self.say("Соединение прервалось. Сейчас работает другой VPN-клиент: выключи его и нажми «Подключить».", err=True)
         self.toggle()
 
     def fail(self):
@@ -2403,12 +2755,14 @@ class App(tk.Tk):
             pass
         self.stop()
         if not IS_WIN and (rc in (126, 127) or "cancel" in err.lower()):
-            return self.say("Не получены права администратора (окно пароля закрыто или недоступно).", err=True)
-        if IS_WIN and was_on and self.may_restart():  # on Linux/macOS a new connection needs the password again
-            self.say("Соединение оборвалось, подключаюсь заново…", err=True)
+            return self.say("Не получилось подтвердить права администратора: окно с паролем закрыто. "
+                            "Нажми «Подключить» и введи пароль.", err=True)
+        if IS_WIN and was_on and self.pro()["auto_reconnect"] and self.may_restart():  # on Linux/macOS a new connection needs the password again
+            self.say("Соединение прервалось, подключаюсь заново…", err=True)
             self.after(1500, self.reconnect)
             return
-        self.say("Ядро остановилось, подробности в логе.", err=True)
+        self.say("Соединение прервалось. Нажми «Подключить» ещё раз. Если так повторяется, выбери другой сервер "
+                 "или обнови подписку.", err=True)
         self.toggle_log(True)
 
     def stop(self):

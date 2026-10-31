@@ -1,7 +1,7 @@
 """The program as a whole, with the window: subscriptions, speed test, flags, settings, tray, update install, connecting,
 reconnect, repair of a refused config. Local fake servers, temp files, no real core connection, never the real
 settings. Run: python tests/test_app.py"""
-import faulthandler; faulthandler.dump_traceback_later(900, exit=True)  # a hang must leave a traceback, not a silent wait
+import faulthandler; faulthandler.dump_traceback_later(420, exit=True)  # a hang must leave a traceback, not a silent wait
 import base64
 import json
 import os
@@ -882,19 +882,19 @@ if vpn.IS_WIN:
     scheduled.clear(); msgs.clear()
     app13.proc, app13.state, app13.t0 = DeadProc(), "on", time.time() - 120
     app13.fail()
-    check("... but not more than 3 times in 10 minutes: then it says so and stops", not scheduled and any("Ядро остановилось" in m for m in msgs), (scheduled, msgs))
+    check("... but not more than 3 times in 10 minutes: then it says so and stops", not scheduled and any("Соединение прервалось" in m and "Нажми" in m for m in msgs), (scheduled, msgs))
     app13.restarts = []
     scheduled.clear(); msgs.clear()
     app13.proc, app13.state, app13.t0 = DeadProc(), "connecting", time.time()
     app13.fail()
-    check("a core that dies while connecting (bad config) is not retried", not scheduled and any("Ядро остановилось" in m for m in msgs), (scheduled, msgs))
+    check("a core that dies while connecting (bad config) is not retried", not scheduled and any("Соединение прервалось" in m and "Нажми" in m for m in msgs), (scheduled, msgs))
     app13.restarts = []
     vpn.karing_running = lambda: True
     toggled13 = []
     app13.toggle = lambda: toggled13.append(1)
     app13.state = "off"
     app13.reconnect()
-    check("reconnect does nothing while another VPN client is running", not toggled13 and any("Другой VPN" in m for m in msgs), msgs)
+    check("reconnect does nothing while another VPN client is running", not toggled13 and any("другой VPN-клиент" in m for m in msgs), msgs)
     vpn.karing_running = lambda: False
     app13.reconnect()
     check("reconnect connects when nothing stands in the way", toggled13 == [1])
@@ -934,6 +934,151 @@ check("connect: the extra domains typed by the user are cleaned before they reac
       dom["domain_suffix"][:2] == ["mine.example", "xn--i1afg.xn--p1ai"], dom["domain_suffix"])
 app13.state = "off"
 app13.proc = None
+
+# 5. plain-language messages: what happened and what to do
+dialogs = []
+vpn.show_error = lambda parent, text: dialogs.append(text)
+real_dialog = vpn.Dialog
+opened_urls = []
+vpn.open_url = lambda url: opened_urls.append(url) or True
+class FakeDialog:
+    def __init__(self, parent, text, buttons, kind="info", default=0, cancel=None, **k):
+        dialogs.append((text, tuple(buttons), kind))
+        self.result = 0
+real_core = vpn.CORE
+vpn.Dialog = FakeDialog
+vpn.CORE = os.path.join(TMP, "no-core-here.exe")
+app13.toggle()
+text, buttons, kind = dialogs[-1]
+check("no core file: the dialog says what happened and what to do, and offers the download",
+      buttons == ("Скачать заново", "Закрыть") and kind == "error" and "антивирус" in text and "Скачай программу заново" in text
+      and "ядр" not in text.lower() and opened_urls == [vpn.RELEASES_URL], (buttons, opened_urls, text[:80]))
+check("... and the status line is plain too", "ядр" not in app13.status.cget("text").lower() and "антивирус" in app13.status.cget("text"))
+vpn.CORE = real_core
+vpn.Dialog = real_dialog
+dialogs.clear()
+real_check = vpn.core_check
+vpn.core_check = lambda path: (False, "FATAL initialize outbound[0]: decode public_key")
+app13.state = "off"
+app13.toggle()
+check("config refused for good: plain steps, technical reason kept below, no terminal codes",
+      dialogs and "Что сделать" in dialogs[-1] and "Обновить" in dialogs[-1] and "Техническая причина: FATAL" in dialogs[-1]
+      and "\x1b" not in dialogs[-1], dialogs[-1:] )
+vpn.core_check = real_check
+vpn.start_core = lambda path: (_ for _ in ()).throw(PermissionError("[WinError 5] Access is denied"))
+dialogs.clear()
+app13.state = "off"
+app13.toggle()
+check("core blocked from starting: antivirus / rights explained, reason kept", dialogs and "антивирус" in dialogs[-1] and "WinError 5" in dialogs[-1], dialogs[-1:])
+vpn.start_core = lambda path: started.append(path) or LiveProc()
+app13.state = "off"
+app13.proc = None
+
+# 6. advanced settings: validation, effect on the config, fallback, the window, the double click
+check("pro defaults are what the program always did",
+      vpn.clean_pro(None)[0] == vpn.PRO_DEFAULTS and vpn.PRO_DEFAULTS["mixed_port"] == 2080 and vpn.PRO_DEFAULTS["tun_stack"] == "mixed")
+old_style = vpn.build_config(app13.outs, "AUTO", True, [], None, None)
+tun = next(i for i in old_style["inbounds"] if i["type"] == "tun")
+check("the default config is the old one (stack, strict route, port, dns, log, auto-test timing)",
+      tun["stack"] == "mixed" and tun["strict_route"] is True and next(i for i in old_style["inbounds"] if i["type"] == "mixed")["listen_port"] == 2080
+      and old_style["log"]["level"] == "info" and old_style["dns"]["servers"][0]["server"] == "1.1.1.1"
+      and old_style["dns"]["servers"][1]["server"] == "77.88.8.8"
+      and next(o for o in old_style["outbounds"] if o.get("tag") == "proxy")["interval"] == "3m")
+custom = vpn.build_config(app13.outs, "AUTO", True, [], None, None, None,
+                          {"mixed_port": 3128, "tun_stack": "gvisor", "strict_route": False, "log_level": "warn",
+                           "dns_remote": "dns.google", "dns_local": "8.8.8.8", "auto_url": "https://x.example/204",
+                           "auto_interval": 7, "auto_tolerance": 120})
+grp = next(o for o in custom["outbounds"] if o.get("tag") == "proxy")
+check("advanced settings reach the config",
+      next(i for i in custom["inbounds"] if i["type"] == "tun")["stack"] == "gvisor"
+      and next(i for i in custom["inbounds"] if i["type"] == "tun")["strict_route"] is False
+      and next(i for i in custom["inbounds"] if i["type"] == "mixed")["listen_port"] == 3128
+      and custom["log"]["level"] == "warn" and custom["dns"]["servers"][0]["server"] == "dns.google"
+      and custom["dns"]["servers"][1]["server"] == "8.8.8.8" and grp["url"] == "https://x.example/204"
+      and grp["interval"] == "7m" and grp["tolerance"] == 120, grp)
+good_outs = vpn.parse_text("trojan://pass@203.0.113.2:443?sni=example.org#T\nhysteria2://pw@203.0.113.3:8443?sni=example.com#H")
+vpn.write_json(vpn.CHECKCFG, vpn.build_config(good_outs, "AUTO", True, [], None, None, None,
+                                              {"mixed_port": 3128, "tun_stack": "gvisor", "strict_route": False, "log_level": "warn",
+                                               "dns_remote": "dns.google", "dns_local": "8.8.8.8", "auto_url": "https://x.example/204",
+                                               "auto_interval": 7, "auto_tolerance": 120}))
+check("... and the real core accepts such a config", vpn.core_check(vpn.CHECKCFG)[0], vpn.core_check(vpn.CHECKCFG)[1][:120])
+# a setting the core refuses must not stop the connection
+app13.cfg["pro"] = {"tun_stack": "system", "mixed_port": 3333}
+real_check = vpn.core_check
+def picky(path):
+    text = open(path, encoding="utf-8").read()
+    return (False, "FATAL stack system is not supported here") if '"stack": "system"' in text else real_check(path)
+vpn.core_check = picky
+started.clear()
+app13.state = "off"
+app13.proc = None
+app13.toggle()
+cfg_now = json.load(open(vpn.RUNCFG, encoding="utf-8"))
+check("connect: advanced settings the core refuses are dropped, the connection still comes up",
+      started == [vpn.RUNCFG] and next(i for i in cfg_now["inbounds"] if i["type"] == "tun")["stack"] == "mixed"
+      and "Расширенные настройки не подошли" in app13.status.cget("text"), (started, app13.status.cget("text")))
+vpn.core_check = real_check
+app13.cfg["pro"] = {}
+app13.state = "off"
+app13.proc = None
+
+pw = app13.open_pro()
+check("the advanced window opens, once", pw.winfo_exists() and app13.open_pro() is pw and app13.pro_win is pw)
+pw.vars["mixed_port"].set("3128")
+pw.vars["tun_stack"].set("gvisor")
+pw.vars["strict_route"].set(False)
+pw.vars["dns_remote"].set("dns.google")
+check("applying valid values saves them (only what differs from the defaults) to the settings file",
+      pw.apply() is True and app13.cfg["pro"] == {"mixed_port": 3128, "tun_stack": "gvisor", "strict_route": False, "dns_remote": "dns.google"}
+      and json.load(open(vpn.SETTINGS, encoding="utf-8"))["pro"]["mixed_port"] == 3128, app13.cfg["pro"])
+check("... and the program uses them", app13.pro()["mixed_port"] == 3128 and app13.pro()["tun_stack"] == "gvisor")
+pw.vars["mixed_port"].set("80")
+pw.vars["auto_url"].set("ftp://nope")
+before = dict(app13.cfg["pro"])
+check("a wrong value is refused, named, outlined in red and nothing is saved",
+      pw.apply() is False and app13.cfg["pro"] == before and "Не сохранено" in pw.msg.cget("text") and "1024" in pw.msg.cget("text")
+      and pw.boxes["mixed_port"].cget("bg") == vpn.RED and pw.boxes["auto_url"].cget("bg") == vpn.RED, pw.msg.cget("text"))
+pw.vars["mixed_port"].set("4000")
+check("typing again clears the red outline", pw.boxes["mixed_port"].cget("bg") == vpn.INK)
+pw.reset()
+check("«По умолчанию» puts the defaults into the fields without saving yet",
+      pw.vars["mixed_port"].get() == "2080" and pw.vars["strict_route"].get() is True and app13.cfg["pro"] == before)
+pw.apply()
+check("... and Apply then stores nothing but defaults", app13.cfg["pro"] == {})
+app13.state = "on"
+pw.vars["test_top"].set("5")
+pw.apply()
+check("applying while connected says the change waits for the next connection",
+      "следующем подключении" in pw.msg.cget("text") and "следующем подключении" in app13.status.cget("text"))
+app13.state = "off"
+pw.close()
+check("closing the window forgets it; opening again makes a new one", app13.pro_win is None and app13.open_pro() is not pw)
+app13.pro_win.close()
+# the double click on «Настройки»
+app13.set_open = False
+app13.set_head.open = False
+app13.update()
+app13.set_head.single()
+check("a single click waits a moment before it acts", app13.set_open is False)
+end = time.time() + 2
+while time.time() < end and not app13.set_open:
+    app13.update()
+    time.sleep(0.02)
+check("... then toggles the settings panel", app13.set_open is True)
+app13.set_head.twice()
+app13.update()
+check("a double click after that puts the panel back and opens the advanced window",
+      app13.set_open is False and app13.pro_win is not None and app13.pro_win.winfo_exists())
+app13.pro_win.close()
+app13.set_head.single()
+app13.set_head.twice()
+time.sleep(vpn.DOUBLE_CLICK_MS / 1000 + 0.2)
+app13.update()
+check("a double click that comes in time cancels the single one: the panel did not flicker",
+      app13.set_open is False and app13.pro_win is not None)
+app13.pro_win.close()
+check("the hint about the double click is in the settings panel",
+      any("двойной щелчок" in w.cget("text") for w in app13.set_box.winfo_children() if isinstance(w, vpn.tk.Label)))
 app13.destroy()
 
 print("\nFAILED:" if fails else "\nALL PASSED", fails if fails else "")
