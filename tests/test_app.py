@@ -574,6 +574,20 @@ for v in (app6.v_flags, app6.v_ping, app6.v_speed):
     v.set(True)
 check("back to full view: button text restored", app6.test_btn.cget("text") == "Тест скорости")
 
+# the test measures around any VPN (sockets bound to the real adapter), so another VPN client running is no reason to doubt it
+real_karing, real_worker = vpn.karing_running, app6._test_worker
+vpn.karing_running = lambda: True
+app6._test_worker = lambda *a, **k: None
+app6.outs = app6.outs or [{"tag": "x", "type": "vless", "server": "1.2.3.4", "server_port": 443}]
+app6.run_test()
+check("another VPN client is running: the test starts and says nothing about inaccurate numbers",
+      app6.testing and "неточн" not in app6.status.cget("text") and "Другой VPN" not in app6.status.cget("text"), app6.status.cget("text"))
+app6.testing = False
+app6.test_btn.config(text=app6.test_label())
+vpn.karing_running, app6._test_worker = real_karing, real_worker
+check("pinging every server at once is the default (waiting for the dead ones is what takes the time)",
+      vpn.PRO_DEFAULTS["test_parallel"] >= 32, vpn.PRO_DEFAULTS["test_parallel"])
+
 # result messages follow what is on
 for i, t in enumerate(tags):
     app6.results[t] = (50.0 + i, 10.0 + i)
@@ -597,15 +611,15 @@ app6.v_speed.set(True)
 check("settings are folded by default", app6.set_box.winfo_manager() == "" and app6.set_head.cget("fg") == vpn.MUTE)
 app6.toggle_settings()
 app6.update()
-order = app6.foot.master.pack_slaves()
+order = app6.sbx.master.pack_slaves()
 check("the settings link opens the panel right below the content; the footer is first in the packing order (never the part that is cut)",
-      app6.set_box.winfo_manager() == "pack" and order[0] is app6.foot and order.index(app6.sbx) < order.index(app6.set_box),
-      [str(w) for w in order])
+      app6.set_box.winfo_manager() == "pack" and app6.foot.master.pack_slaves()[0] is app6.foot
+      and order.index(app6.sbx) < order.index(app6.set_box), [str(w) for w in order])
 app6.toggle_log(True)
 app6.update()
-order = app6.foot.master.pack_slaves()
+order = app6.sbx.master.pack_slaves()
 check("with the log open too: content, settings, log, and the footer still first in the order",
-      order[0] is app6.foot and order.index(app6.sbx) < order.index(app6.set_box) < order.index(app6.log_box))
+      app6.foot.master.pack_slaves()[0] is app6.foot and order.index(app6.sbx) < order.index(app6.set_box) < order.index(app6.log_box))
 app6.toggle_log(False)
 app6.update()
 app6.toggle_settings()
@@ -1029,20 +1043,58 @@ app13.proc = None
 
 # 5c. the window never grows past the screen: the footer with «Лог» and «Настройки» stays reachable
 real_sh = app13.winfo_screenheight
-app13.winfo_screenheight = lambda: 960
-app13.toggle_settings(True)
+
+def frame_bottom(a):
+    """Bottom edge of the window's frame on the screen."""
+    a.update()
+    return a.winfo_rooty() + a.winfo_height() + vpn.P(8)
+
+
+def inside(a, screen_h):
+    top, bottom = a.work_area()
+    return a.winfo_y() >= top and frame_bottom(a) <= bottom + 1 and a.foot.winfo_rooty() + a.foot.winfo_height() <= a.winfo_rooty() + a.winfo_height()
+
+
+for scr in (900, 768, 600):  # screens of any height: with everything open the window stays inside, the footer in view
+    app13.winfo_screenheight = lambda scr=scr: scr
+    for opened in ("settings", "log", "both"):
+        app13.toggle_settings(opened in ("settings", "both"))
+        app13.toggle_log(opened in ("log", "both"))
+        app13.update()
+        check(f"a {scr}-px screen, {opened} open: the whole window frame and the footer are on the screen",
+              inside(app13, scr), (app13.winfo_y(), frame_bottom(app13), app13.work_area(), app13.winfo_height()))
+        check("... the window can be minimised and moved: its title bar is not above the screen", app13.winfo_y() >= app13.work_area()[0], app13.winfo_y())
+app13.winfo_screenheight = lambda: 900
+app13.toggle_settings(True); app13.toggle_log(True)
 app13.update()
-foot_bottom = app13.foot.winfo_y() + app13.foot.winfo_height()
-check("small screen: with the settings open the server list gives way and the footer is inside the window",
-      int(app13.tree.cget("height")) < 6 and foot_bottom <= app13.winfo_height(), (app13.tree.cget("height"), foot_bottom, app13.winfo_height()))
-check("... and the window fits the screen", app13.winfo_height() <= 960, app13.winfo_height())
+check("content taller than the window: the body scrolls (a bar is shown) instead of growing the window",
+      app13._bar_on and app13.winfo_height() <= app13.avail_height(), (app13._bar_on, app13.winfo_height(), app13.avail_height()))
+app13.canvas.yview_moveto(1.0)
+app13.update()
+check("... and scrolled to the end the last row is visible, the footer never moves",
+      app13.foot.winfo_rooty() + app13.foot.winfo_height() <= app13.winfo_rooty() + app13.winfo_height()
+      and app13.log_box.winfo_rooty() + app13.log_box.winfo_height() <= app13.foot.winfo_rooty() + 2)
+app13.canvas.yview_moveto(0)
 app13.winfo_screenheight = lambda: 2000
-app13.toggle_settings(False)
+app13.toggle_settings(False); app13.toggle_log(False)
 app13.toggle_settings(True)
 app13.update()
-check("tall screen: the list has its normal size again", int(app13.tree.cget("height")) == 6, app13.tree.cget("height"))
+check("tall screen: the list has its normal size again and no bar is shown", int(app13.tree.cget("height")) == 6 and not app13._bar_on,
+      (app13.tree.cget("height"), app13._bar_on))
+app13.toggle_settings(False)
+# a window dragged down so that its lower part is off the screen is pulled back when it grows
+app13.winfo_screenheight = lambda: 900
+app13.geometry(f"+{app13.winfo_x()}+{app13.work_area()[1] - 200}")
+app13.update()
+app13.toggle_settings(True)
+app13.update()
+check("a window low on the screen is pulled up when the panel opens", inside(app13, 900), (app13.winfo_y(), frame_bottom(app13), app13.work_area()))
 app13.toggle_settings(False)
 app13.winfo_screenheight = real_sh
+app13.fit_height()
+
+check("the smallest size the window may be shrunk to never exceeds a small screen",
+      app13.minsize()[1] <= max(app13.avail_height(), 1) or app13.minsize()[1] <= vpn.P(560), app13.minsize())
 
 # 6. advanced settings: validation, effect on the config, fallback, the window, the double click
 check("pro defaults are what the program always did",

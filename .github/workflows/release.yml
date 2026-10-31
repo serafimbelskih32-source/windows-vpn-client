@@ -67,7 +67,7 @@ jobs:
           ls -la core
 
       - name: Python packages and icons
-        run: pip install pillow pystray && python make_icon.py
+        run: pip install pillow pystray certifi && python make_icon.py
 
       - name: Tests
         shell: bash
@@ -89,16 +89,16 @@ jobs:
           pip install pyinstaller==6.22.3
           if [ "$RUNNER_OS" = "Windows" ]; then
             pyinstaller --noconfirm --onefile --windowed --uac-admin --name FimaVPN --icon icon.ico \
-              --collect-submodules pystray --add-data "core;core" --add-data "icon.ico;." --add-data "icon.png;." vpn.py
+              --collect-submodules pystray --collect-data certifi --add-data "core;core" --add-data "icon.ico;." --add-data "icon.png;." vpn.py
           elif [ "$RUNNER_OS" = "macOS" ]; then
             pyinstaller --noconfirm --windowed --name FimaVPN --icon icon.icns \
-              --collect-submodules pystray --add-data "core:core" --add-data "icon.png:." vpn.py
+              --collect-submodules pystray --collect-data certifi --add-data "core:core" --add-data "icon.png:." vpn.py
             # ad-hoc signature: Apple Silicon refuses to run unsigned code
             find dist/FimaVPN.app -name sing-box -type f -exec codesign --force -s - {} \;
             codesign --force --deep -s - dist/FimaVPN.app
             ditto -c -k --sequesterRsrc --keepParent dist/FimaVPN.app "dist/${{ matrix.asset }}"
           else
-            pyinstaller --noconfirm --onefile --name FimaVPN --collect-submodules pystray \
+            pyinstaller --noconfirm --onefile --name FimaVPN --collect-submodules pystray --collect-data certifi \
               --add-data "core:core" --add-data "icon.png:." vpn.py
             mv dist/FimaVPN "dist/${{ matrix.asset }}"
           fi
@@ -110,6 +110,8 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then
             xvfb-run -a "dist/${{ matrix.asset }}" --selftest < tests/sample_links.txt
             xvfb-run -a "dist/${{ matrix.asset }}" --tray-selftest | tee /dev/stderr | grep -q "^ok"
+            # the built program must open https sites the way a subscription download does (it could not on a Mac)
+            xvfb-run -a "dist/${{ matrix.asset }}" --net-selftest
             # an update replaces the running program with another file and starts it again: prove that works in the built binary
             T=$(mktemp -d); cp "dist/${{ matrix.asset }}" "$T/app"; cp "dist/${{ matrix.asset }}" "$T/new"
             FIMA_SWAP_MARKER="$T/marker" xvfb-run -a "$T/app" --swap-selftest "$T/new"
@@ -118,6 +120,7 @@ jobs:
           elif [ "$RUNNER_OS" = "macOS" ]; then
             dist/FimaVPN.app/Contents/MacOS/FimaVPN --selftest < tests/sample_links.txt
             dist/FimaVPN.app/Contents/MacOS/FimaVPN --tray-selftest | tee /dev/stderr | grep -q "^ok"
+            dist/FimaVPN.app/Contents/MacOS/FimaVPN --net-selftest
             find dist/FimaVPN.app -name sing-box -type f -exec ls -la {} \;
           else
             ls -la "dist/${{ matrix.asset }}"

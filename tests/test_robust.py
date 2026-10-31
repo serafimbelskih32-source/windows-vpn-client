@@ -193,7 +193,7 @@ got, errs = vpn.clean_pro({"mixed_port": "8080", "auto_interval": 5, "dns_remote
 check("pro: good values pass (strings of digits become numbers)", not errs and got["mixed_port"] == 8080 and got["test_secs"] == 7
       and got["log_level"] == "warn" and got["strict_route"] is False and got["auto_reconnect"] is False, (got, errs))
 for key, bad in (("mixed_port", "80"), ("mixed_port", "70000"), ("mixed_port", "abc"), ("mixed_port", True), ("mixed_port", 3.5),
-                 ("auto_interval", 0), ("auto_tolerance", -1), ("test_top", 51), ("test_parallel", 17), ("test_secs", 31),
+                 ("auto_interval", 0), ("auto_tolerance", -1), ("test_top", 51), ("test_parallel", 129), ("test_secs", 31),
                  ("tun_stack", "tap"), ("log_level", "trace"), ("strict_route", "yes"), ("auto_reconnect", 1),
                  ("dns_remote", "not a host"), ("dns_remote", "999.1.1.1"), ("dns_local", "http://x"), ("dns_local", ""),
                  ("auto_url", "ftp://x.example"), ("auto_url", "https://"), ("auto_url", "https://a b"), ("auto_url", "https://x/" + "a" * 300)):
@@ -211,7 +211,7 @@ class Resp:
     def __enter__(self): return self
     def __exit__(self, *a): return False
 real_open = vpn.updater.urlopen
-vpn.updater.urlopen = lambda req, timeout=0: Resp(vpn.MAX_SUB_BYTES * 2)
+vpn.updater.urlopen = lambda req, timeout=0, proxy=None: Resp(vpn.MAX_SUB_BYTES * 2)
 try:
     vpn.fetch("https://sub.example/secret-key-123", "ua")
     capped = False
@@ -219,7 +219,10 @@ except ValueError:
     capped = True
 vpn.updater.urlopen = real_open
 check("an oversized subscription answer is refused", capped)
+real_doh = vpn.updater.resolve_doh
+vpn.updater.resolve_doh = lambda host, timeout=6: []  # no network needed for this one
 outs_, info_, ua_, errs = vpn.fetch_source("https://sub.example/secret-key-123?token=abc", None)
+vpn.updater.resolve_doh = real_doh
 check("an unreachable subscription's message does not show its secret path", errs and all("secret" not in e and "token" not in e for e in errs), errs)
 
 # ---------- random damage ----------
@@ -317,6 +320,78 @@ if HAVE_CORE:
           [i["listen_port"] for i in tc["inbounds"]])
 else:
     print("     (no core next to vpn.py: the core checks were skipped)")
+
+# ---------- getting a subscription whatever the network does ----------
+import socket  # noqa: E402
+import urllib.error  # noqa: E402
+
+BODY = open(os.path.join(here, "sample_links.txt"), encoding="utf-8").read()
+SECRET = "https://sub.example.org/abcdSECRETKEY1234/sub"
+calls = []
+
+
+class SubResp:
+    def __init__(self, text): self.text, self.headers = text.encode(), {"Profile-Title": "T"}
+    def read(self, n=-1): return self.text
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+def fake_urlopen(plan):
+    """plan: list of outcomes per call: an exception to raise or the text to return."""
+    it = iter(plan)
+
+    def fn(req, timeout=30, proxy=None):
+        calls.append((req.get_header("User-agent"), proxy))
+        out = next(it)
+        if isinstance(out, Exception):
+            raise out
+        return SubResp(out)
+    return fn
+
+
+real_urlopen, real_resolved = vpn.updater.urlopen, vpn.updater.get_resolved
+try:
+    # the provider's DNS does not work: the address comes from DNS-over-HTTPS
+    vpn.updater.urlopen = fake_urlopen([urllib.error.URLError(socket.gaierror(11001, "getaddrinfo failed"))])
+    vpn.updater.get_resolved = lambda url, headers, timeout=20, max_bytes=0: (BODY.encode(), {"profile-title": "T"})
+    calls.clear()
+    outs, info, ua, errs = vpn.fetch_source(SECRET)
+    check("a subscription is fetched even when the provider's DNS does not answer", len(outs) > 0 and not errs, (len(outs), errs))
+
+    # no connection at all: the second User-Agent must not wait for the same timeout again
+    vpn.updater.urlopen = fake_urlopen([urllib.error.URLError(socket.timeout("timed out"))] * 4)
+    calls.clear()
+    outs, info, ua, errs = vpn.fetch_source(SECRET)
+    check("no connection: one attempt, not one per User-Agent", len(calls) == 1 and not outs, calls)
+    check("... the reason is in plain words, with the host and without the key",
+          len(errs) == 1 and errs[0].startswith("sub.example.org: ") and "не ответил" in errs[0] and "SECRETKEY" not in errs[0], errs)
+
+    # no connection directly, but the VPN is up: try through it
+    vpn.updater.urlopen = fake_urlopen([urllib.error.URLError(ConnectionResetError(54, "reset")), BODY])
+    calls.clear()
+    outs, info, ua, errs = vpn.fetch_source(SECRET, None, "http://127.0.0.1:2080")
+    check("blocked directly: the same subscription is fetched through the running VPN",
+          len(outs) > 0 and not errs and calls[0][1] is None and calls[1][1] == "http://127.0.0.1:2080", (calls, errs))
+
+    # the site refuses one User-Agent: the other one gets in
+    vpn.updater.urlopen = fake_urlopen([urllib.error.HTTPError(SECRET, 403, "Forbidden", {}, None), BODY])
+    calls.clear()
+    outs, info, ua, errs = vpn.fetch_source(SECRET)
+    check("a refusal (403) for one User-Agent: the next one is tried", len(outs) > 0 and len(calls) == 2 and calls[0][0] != calls[1][0], calls)
+
+    # an answer that is not a subscription
+    vpn.updater.urlopen = fake_urlopen(["<html>login</html>"] * 2)
+    outs, info, ua, errs = vpn.fetch_source(SECRET)
+    check("an answer without servers says so", not outs and len(errs) == 1 and "нет серверов" in errs[0], errs)
+
+    # everything fails: both routes are reported, each reason once
+    vpn.updater.urlopen = fake_urlopen([urllib.error.URLError(socket.timeout("timed out")),
+                                        urllib.error.URLError(socket.timeout("timed out"))])
+    outs, info, ua, errs = vpn.fetch_source(SECRET, None, "http://127.0.0.1:2080")
+    check("the same reason from both routes is shown once", not outs and len(errs) == 1, errs)
+finally:
+    vpn.updater.urlopen, vpn.updater.get_resolved = real_urlopen, real_resolved
 
 print("\nFAILED:" if fails else "\nALL PASSED", fails if fails else "")
 sys.exit(1 if fails else 0)

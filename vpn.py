@@ -29,6 +29,8 @@ import flags
 import tray
 import updater
 
+updater.trust_certificates()  # a packaged program on a Mac has no certificates of its own: without this no https works
+
 AUTO_LABEL = "Быстрейший из списка"
 APP = "FimaVPN"  # settings folder name only
 TITLE = "VPN"
@@ -433,14 +435,22 @@ MAX_SUB_BYTES = 8 * 1024 * 1024  # a real subscription is tens of kilobytes
 REFRESH_DEFAULT_H = 12  # when the provider does not send profile-update-interval
 
 
-def fetch(url: str, ua: str):
-    """Returns (body, headers with lower-case names)."""
+def fetch(url: str, ua: str, via=None):
+    """Returns (body, headers with lower-case names). `via` = 'http://host:port' of a proxy to go through. A provider
+    whose DNS does not answer is bypassed: the address is then asked from a public DNS-over-HTTPS server."""
     req = urllib.request.Request(url, headers={"User-Agent": ua})
-    with updater.urlopen(req, timeout=20) as r:
-        body = r.read(MAX_SUB_BYTES + 1)
-        if len(body) > MAX_SUB_BYTES:
-            raise ValueError("ответ слишком большой для подписки")
-        return body.decode("utf-8", "replace"), {k.lower(): v for k, v in r.headers.items()}
+    try:
+        with updater.urlopen(req, timeout=20, proxy=via) as r:
+            body = r.read(MAX_SUB_BYTES + 1)
+            headers = {k.lower(): v for k, v in r.headers.items()}
+    except Exception as e:  # noqa: BLE001
+        if via or not updater.is_dns_failure(e):
+            raise
+        raw, headers = updater.get_resolved(url, {"User-Agent": ua}, 20, MAX_SUB_BYTES)
+        body = raw
+    if len(body) > MAX_SUB_BYTES:
+        raise ValueError("ответ слишком большой для подписки")
+    return body.decode("utf-8", "replace"), headers
 
 
 def split_sources(src: str):
@@ -480,19 +490,29 @@ def sub_info(headers):
     return info
 
 
-def fetch_source(url, prefer=None):
-    """Fetch one subscription, trying the UA that worked last time first. Returns (outs, info, ua, errors)."""
+def fetch_source(url, prefer=None, via=None):
+    """Fetch one subscription, trying the UA that worked last time first, then (if a VPN of ours is up) through it.
+    Returns (outs, info, ua, errors)."""
     errors = []
-    for ua in sorted(UAS, key=lambda u: u != prefer):
-        try:
-            body, headers = fetch(url, ua)
-        except Exception as e:
-            errors.append(f"{urlsplit(url).hostname or 'подписка'}: {e}")  # the path holds the user's key: not shown
-            continue
-        outs = parse_text(body)
-        if outs:
-            return outs, sub_info(headers), ua, []
-    return [], {}, None, errors or [f"{urlsplit(url).hostname or 'подписка'}: в ответе нет серверов"]
+    host = urlsplit(url).hostname or "подписка"  # the path holds the user's key: never shown
+    for route in ((None, via) if via else (None,)):
+        for ua in sorted(UAS, key=lambda u: u != prefer):
+            try:
+                body, headers = fetch(url, ua, route)
+            except Exception as e:  # noqa: BLE001
+                msg = f"{host}: {updater.explain(e)}"
+                if msg not in errors:
+                    errors.append(msg)
+                if not updater.is_http_error(e):
+                    break  # no connection at all: the other User-Agent would wait for the same timeout again
+                continue  # the site answered "no": another User-Agent may please it
+            outs = parse_text(body)
+            if outs:
+                return outs, sub_info(headers), ua, []
+            msg = f"{host}: в ответе нет серверов (ссылка устарела или это не подписка)"
+            if msg not in errors:
+                errors.append(msg)
+    return [], {}, None, errors
 
 
 def merge_outs(groups):
@@ -536,7 +556,7 @@ PRO_FIELDS = {
     "auto_tolerance": (50, "int", (0, 1000)),
     "test_top": (8, "int", (1, 50)),
     "test_secs": (4, "int", (1, 30)),
-    "test_parallel": (8, "int", (1, 16)),
+    "test_parallel": (64, "int", (1, 128)),
     "log_level": ("info", "choice", ("debug", "info", "warn", "error")),
 }
 PRO_DEFAULTS = {k: v[0] for k, v in PRO_FIELDS.items()}
@@ -907,7 +927,7 @@ PRO_LAYOUT = (
     ("Тест скорости", (
         ("test_top", "У скольких лучших по пингу мерить скорость", "entry", None),
         ("test_secs", "Секунд на каждый сервер", "entry", None),
-        ("test_parallel", "Сколько серверов проверять одновременно", "entry", None),
+        ("test_parallel", "Сколько серверов пинговать одновременно", "entry", "Скорость всегда меряется по одному серверу: иначе они делят канал и цифры врут."),
     )),
     ("Журнал", (
         ("log_level", "Подробность журнала ядра", "choice", "debug пишет всё подряд, error только ошибки."),
@@ -1727,14 +1747,16 @@ class App(tk.Tk):
             pass
         set_window_icon(self)
         self.configure(bg=BG)
-        self.geometry(f"{P(480)}x{P(840)}")
-        self.minsize(P(440), P(760))
+        avail = self.avail_height()
+        self.geometry(f"{P(480)}x{min(P(840), avail)}")
+        self.minsize(P(440), min(P(560), avail))  # never taller than the screen can show, whatever its size and scaling
         fams = set(tkfont.families())
         fam = next((f for f in UI_FONTS if f in fams), UI_FONTS[-1])
         self.fam = fam
         self.f_h, self.f_b, self.f_s = (fam, FZ(12), "bold"), (fam, FZ(11)), (fam, FZ(10))
         self.proc = None
         self.pro_win = None  # the advanced settings window, while it is open
+        self.mixed_active = None  # port of the local proxy of the running connection
         self.test_proc = None
         self.test_skip = set()  # rows of the server list the core refused in the last test
         self.restarts = []  # when the connection was brought back after the core stopped on its own
@@ -1810,8 +1832,23 @@ class App(tk.Tk):
         st.configure("Flat.Vertical.TScrollbar", background=INK, troughcolor=PAPER, borderwidth=0, width=P(10))
 
         side = P(22)
-        root = tk.Frame(self, bg=BG)
-        root.pack(fill="both", expand=True, padx=side, pady=(P(18), P(16)))
+        shell = tk.Frame(self, bg=BG)
+        shell.pack(fill="both", expand=True, padx=side, pady=(P(18), P(16)))
+        # The footer is first in the packing order: when the window is too short something else is cut, never this row.
+        # Everything above it lives on a canvas that scrolls when the screen is too small to show it whole.
+        self.foot = tk.Frame(shell, bg=BG)
+        self.foot.pack(side="bottom", fill="x", pady=(P(14), 0))
+        self.canvas = tk.Canvas(shell, bg=BG, highlightthickness=0, bd=0, yscrollincrement=P(24))
+        self.vbar = ttk.Scrollbar(shell, orient="vertical", style="Flat.Vertical.TScrollbar", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.vbar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        root = self.body = tk.Frame(self.canvas, bg=BG)
+        self.body_id = self.canvas.create_window(0, 0, window=root, anchor="nw")
+        self._syncing = self._sync_again = self._bar_on = False
+        root.bind("<Configure>", lambda e: self.sync_scroll())
+        self.canvas.bind("<Configure>", lambda e: self.sync_scroll())
+        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.bind_all(ev, self.on_body_wheel, add="+")
 
         if IS_WIN and not is_admin():
             tk.Label(root, text="Нужны права администратора", font=self.f_s, bg=RED, fg=WHITE,
@@ -1913,8 +1950,6 @@ class App(tk.Tk):
                  font=self.f_s, bg=BG, fg=MUTE, anchor="w", justify="left", wraplength=P(430)).pack(fill="x", pady=(P(8), 0))
 
         # footer: deliberately quiet. Small grey links; the version on the right.
-        self.foot = tk.Frame(root, bg=BG)
-        self.foot.pack(side="bottom", fill="x", pady=(P(14), 0), before=root.pack_slaves()[0])  # first in the packing order: when the window is too short something else is cut, never this row
         self.log_head = self.quiet_link(self.foot, "Лог", self.toggle_log)
         self.log_head.pack(side="left")
         self.set_head = self.quiet_link(self.foot, "Настройки", self.toggle_settings, double=self.open_pro)
@@ -1940,6 +1975,7 @@ class App(tk.Tk):
         self._pump_id = self.after(50, self.pump)
         self.start_instance_server()
         self.after(300, self.refresh_due)
+        self.after(120, lambda: self.fit_height(P(840)))
         self._tick_id = self.after(500, self.tick)
         self.after(1500, self.update_startup)
 
@@ -2098,20 +2134,104 @@ class App(tk.Tk):
             self.log_box.pack_forget()
         self.fit_height()
 
-    def fit_height(self):
-        """Resize to what the content needs, keeping the width (geometry("") would also reset the width to the widest
-        child's natural request: the 80-character text fields make that wider than the window)."""
+    def work_area(self):
+        """(top, bottom) of the usable screen in pixels: without the taskbar, the menu bar or the dock."""
+        top, bottom = 0, self.winfo_screenheight()
+        if IS_WIN:
+            try:
+                from ctypes import wintypes
+                r = wintypes.RECT()
+                if ctypes.windll.user32.SystemParametersInfoW(0x30, 0, ctypes.byref(r), 0):  # SPI_GETWORKAREA
+                    top, bottom = max(top, r.top), min(bottom, r.bottom)
+            except Exception:  # noqa: BLE001
+                pass
+        elif IS_MAC:
+            top, bottom = P(24), bottom - P(70)
+        else:
+            bottom -= P(48)
+        return top, bottom
+
+    def avail_height(self):
+        """The tallest the window may be (its inner height): the usable screen minus the title bar and the frame."""
+        top, bottom = self.work_area()
+        return max(P(300), bottom - top - P(48 if IS_WIN else 36))
+
+    def keep_on_screen(self):
+        """Pull the window back so that all of it, the title bar down to the bottom edge, is on the usable screen: where
+        Windows first puts a window and the growth of the panels can both push its lower part off the screen, and
+        with it the buttons that minimise it and the footer."""
+        try:
+            self.update_idletasks()
+            top, bottom = self.work_area()
+            x, y = self.winfo_x(), self.winfo_y()
+            outer = self.winfo_height() + max(0, self.winfo_rooty() - y) + P(8)
+            ny = max(top, min(y, bottom - outer))
+            if ny != y:
+                self.geometry(f"+{x}+{ny}")
+        except tk.TclError:
+            pass
+
+    def sync_scroll(self):
+        """The scrolling body as wide as its canvas (and at least as tall), the scroll bar only while the content does
+        not fit."""
+        if self._syncing:  # showing or hiding the bar resizes the canvas: look again once that has settled
+            self._sync_again = True
+            return
+        self._syncing = True
+        try:
+            c = self.canvas
+            need = self.body.winfo_reqheight()
+            have = c.winfo_height()
+            c.itemconfigure(self.body_id, width=max(1, c.winfo_width()), height=max(need, have))
+            c.configure(scrollregion=(0, 0, max(1, c.winfo_width()), max(need, have)))
+            if need > have + 1 and have > 1:
+                if not self._bar_on:  # (own flag: winfo_ismapped() lags behind pack until the event loop runs)
+                    self.vbar.pack(side="right", fill="y")
+                    self._bar_on = True
+            elif self._bar_on:
+                self.vbar.pack_forget()
+                self._bar_on = False
+                c.yview_moveto(0)
+        except tk.TclError:
+            pass
+        finally:
+            self._syncing = False
+        if self._sync_again:
+            self._sync_again = False
+            self.after_idle(self.sync_scroll)
+
+    def on_body_wheel(self, e):
+        """The mouse wheel scrolls the body, except over the widgets that scroll themselves."""
+        try:
+            w = e.widget
+            if w.winfo_toplevel() is not self or isinstance(w, (tk.Text, ttk.Treeview)) or not self._bar_on:
+                return
+        except (AttributeError, tk.TclError, KeyError):
+            return
+        up = getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0
+        self.canvas.yview_scroll(-1 if up else 1, "units")
+
+    def fit_height(self, floor=None):
+        """Resize to what the content needs, but never taller than the screen shows: first the server list gives way,
+        then the body scrolls. Keeps the width (geometry("") would also reset it to the widest child's natural request:
+        the 80-character text fields make that wider than the window)."""
         self.update_idletasks()
-        avail = self.winfo_screenheight() - P(120)  # the taskbar and the title bar take the rest
+        avail = self.avail_height()
         rows = 6
-        self.tree.configure(height=rows)
-        self.update_idletasks()
-        while self.winfo_reqheight() > avail and rows > 2:  # too tall for the screen: the server list gives way, not the footer
-            rows -= 1
+        while True:  # the window asks for the body's height plus the footer; the server list gives way until that fits
             self.tree.configure(height=rows)
             self.update_idletasks()
+            self.canvas.configure(height=self.body.winfo_reqheight())
+            self.update_idletasks()
+            if self.winfo_reqheight() <= avail or rows <= 2:
+                break
+            rows -= 1
         w = self.winfo_width()
-        self.geometry(f"{w if w > 100 else P(480)}x{min(max(self.winfo_reqheight(), P(760)), max(avail, P(520)))}")
+        h = min(max(self.winfo_reqheight(), min(floor or P(760), avail)), avail)
+        self.geometry(f"{w if w > 100 else P(480)}x{h}")
+        self.update_idletasks()
+        self.keep_on_screen()
+        self.sync_scroll()
 
     def toggle_settings(self, force=None):
         self.set_open = (not self.set_open) if force is None else force
@@ -2319,11 +2439,13 @@ class App(tk.Tk):
         urls, inline = split_sources(self.cfg["sources"])
         targets = urls if manual else [u for u in only if u in urls]
         prefer = {u: self.subs.get(u, {}).get("ua") for u in targets}
+        # a provider that blocks the direct way is often reachable through the VPN that is already up
+        via = f"http://127.0.0.1:{self.mixed_active}" if self.state == "on" and self.mixed_active else None
         self.loading = True
         self.sub_note.config(text="обновляю…")
 
         def work():
-            got = {u: fetch_source(u, prefer[u]) for u in targets}
+            got = {u: fetch_source(u, prefer[u], via) for u in targets}
             inline_outs = [o for line in inline for o in parse_text(line)]
             self._ui(lambda: self.loaded(got, inline_outs, urls, manual, silent))
         threading.Thread(target=work, daemon=True).start()
@@ -2465,7 +2587,7 @@ class App(tk.Tk):
         self.testing = True
         self.test_stop.clear()
         self.test_btn.config(text="Остановить")
-        self.say("Другой VPN-клиент включён, замеры могут быть неточными." if karing_running() else "")
+        self.say("")
         threading.Thread(target=self._test_worker, args=(list(self.outs), plan), daemon=True).start()
 
     def _ui(self, fn):
@@ -2802,6 +2924,7 @@ class App(tk.Tk):
                 notes.append("Расширенные настройки не подошли, использованы обычные.")
             write()
             ok, msg = core_check(RUNCFG)
+        self.mixed_active = mixed
         return ok, msg, " ".join(notes)
 
     def pro(self):
@@ -3075,6 +3198,33 @@ def swap_selftest(new_exe):
     return 0 if updater.apply_staged(info, relaunch=True) else 1
 
 
+def net_selftest():
+    """`--net-selftest` in a packaged build, CI: the program must be able to open https sites the way a subscription
+    download does. A packaged Python without certificates fails here (as it did on a Mac) while every unit test passes."""
+    import ssl
+    ok = True
+    ctx = updater.ssl_context()
+    print("trusted certificate authorities:", ctx.cert_store_stats().get("x509_ca"), "| python", sys.version.split()[0])
+    try:  # what a program without our fix would do: only informs
+        urllib.request.urlopen("https://api.github.com/zen", timeout=15, context=ssl.create_default_context()).read()
+        print("plain python https: ok")
+    except Exception as e:  # noqa: BLE001
+        print("plain python https: FAILS (", str(e)[:100], ") - the reason a fix is needed on this system")
+    checks = (
+        ("fetch() like a subscription", lambda: fetch("https://api.github.com/zen", "v2rayN/7.0")[0]),
+        ("http.client like the ping probe", lambda: http.client.HTTPSConnection("www.gstatic.com", timeout=15).request("GET", "/generate_204")),
+        ("DNS-over-HTTPS fallback", lambda: updater.get_resolved("https://api.github.com/zen", {"User-Agent": "v2rayN/7.0"}, 15)[0]),
+    )
+    for name, fn in checks:
+        try:
+            fn()
+            print(name + ": ok")
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            print(name + ": FAILED:", updater.explain(e), "|", e)
+    return 0 if ok else 1
+
+
 def apply_pending_update():
     """At start: if automatic updates are on and a verified newer version is waiting, install it and restart."""
     try:
@@ -3103,6 +3253,8 @@ if __name__ == "__main__":
         with open(os.environ["FIMA_SWAP_MARKER"], "w") as _f:
             _f.write(f"started {sys.executable}")
         sys.exit(0)
+    if "--net-selftest" in sys.argv:  # packaged build, CI: can it open https sites at all?
+        sys.exit(net_selftest())
     if not any(a in sys.argv for a in ("--selftest", "--tray-selftest")) and already_running():
         if not signal_running_instance():  # it did not answer: say so, in the app's style
             _r = tk.Tk()

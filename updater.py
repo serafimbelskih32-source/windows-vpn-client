@@ -5,17 +5,20 @@ release's SHA256SUMS.txt and verify the hash -> keep it staged in the data folde
 closed or started again (the running program cannot overwrite itself, so a tiny helper does the swap).
 """
 import hashlib
+import http.client
 import json
 import os
 import platform
 import re
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 VERSION = "1.2.0"  # the release workflow rewrites this line from the git tag
 REPO = "serafimbelskih32-source/windows-vpn-client"
@@ -67,9 +70,154 @@ def usable_proxies():
     return out
 
 
-def urlopen(req, timeout=30):
-    """urllib's urlopen with usable_proxies() instead of whatever the system says."""
-    return urllib.request.build_opener(urllib.request.ProxyHandler(usable_proxies())).open(req, timeout=timeout)
+# Where operating systems keep their list of trusted certificate authorities, besides the one OpenSSL was built to use.
+CA_FILES = ("/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/pki/tls/cert.pem")
+_ctx = None
+
+
+def ssl_context():
+    """TLS settings that can check a site's certificate on every system. A packaged program carries its own OpenSSL,
+    which looks for certificates in a folder of the computer it was built on: on a Mac (and some Linux systems) that
+    folder does not exist, and every https request then fails with CERTIFICATE_VERIFY_FAILED. So the trusted list is
+    whatever the system offers plus the Mozilla list that ships with the program (certifi), plus the system's files."""
+    global _ctx
+    if _ctx is None:
+        ctx = ssl.create_default_context()
+        files = list(CA_FILES)
+        try:
+            import certifi
+            files.insert(0, certifi.where())
+        except Exception:  # noqa: BLE001
+            pass
+        for f in files:
+            if os.path.isfile(f):
+                try:
+                    ctx.load_verify_locations(cafile=f)
+                except (ssl.SSLError, OSError):
+                    pass
+        _ctx = ctx
+    return _ctx
+
+
+def trust_certificates():
+    """Make every https request of this program (urllib and http.client alike) use ssl_context()."""
+    ssl._create_default_https_context = ssl_context  # the documented hook certifi itself recommends
+
+
+def urlopen(req, timeout=30, proxy=None):
+    """urllib's urlopen with usable_proxies() (or `proxy`, 'http://host:port') instead of whatever the system says."""
+    proxies = {"http": proxy, "https": proxy} if proxy else usable_proxies()
+    return urllib.request.build_opener(urllib.request.ProxyHandler(proxies),
+                                       urllib.request.HTTPSHandler(context=ssl_context())).open(req, timeout=timeout)
+
+
+def explain(e):
+    """Why a request failed, in words an ordinary user can act on."""
+    reason = getattr(e, "reason", e)
+    text = str(reason)
+    if isinstance(e, urllib.error.HTTPError):
+        c = e.code
+        if c in (401, 403):
+            return f"сервер отказал в доступе (код {c}): ссылка устарела, подписка отключена или сайт не пускает программу"
+        if c == 404:
+            return "по этой ссылке ничего нет (код 404): проверь, что ссылка скопирована целиком"
+        if c == 429:
+            return "слишком много запросов (код 429): подожди несколько минут и попробуй снова"
+        if c >= 500:
+            return f"на стороне сайта неполадка (код {c}): попробуй позже"
+        return f"сайт ответил кодом {c}"
+    if isinstance(reason, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in text:
+        return ("сертификат сайта не прошёл проверку. Проверь дату и время на устройстве. Если стоит антивирус, который "
+                "проверяет защищённые соединения, или ты в сети, где подменяют сертификаты, подписку не загрузить")
+    if isinstance(reason, ssl.SSLError):
+        return "не получилось установить защищённое соединение с сайтом. Скорее всего, его блокирует провайдер"
+    if isinstance(reason, socket.gaierror) or "getaddrinfo" in text or "Name or service not known" in text:
+        return "не нашёл адрес сайта (DNS). Проверь интернет. Если у провайдера не работает DNS, программа попробует обойти это сама"
+    if isinstance(reason, (socket.timeout, TimeoutError)) or "timed out" in text:
+        return "сайт не ответил вовремя. Возможно, его блокирует провайдер: включи другой VPN и нажми «Обновить»"
+    if isinstance(reason, (ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError)):
+        return "соединение отклонено или оборвано. Так бывает, когда сайт блокирует провайдер: включи другой VPN и нажми «Обновить»"
+    if isinstance(reason, OSError) and getattr(reason, "errno", None) in (51, 65, 101, 113, 10051, 10065):
+        return "нет сети: проверь подключение к интернету"
+    return (text or e.__class__.__name__)[:160]
+
+
+def is_dns_failure(e):
+    reason = getattr(e, "reason", e)
+    return isinstance(reason, socket.gaierror) or "getaddrinfo" in str(reason) or "Name or service not known" in str(reason)
+
+
+def is_http_error(e):
+    return isinstance(e, urllib.error.HTTPError)
+
+
+DOH_URLS = ("https://1.1.1.1/dns-query", "https://8.8.8.8/resolve")  # asked by address: no name lookup to get blocked
+
+
+def resolve_doh(host, timeout=6):
+    """IPv4 addresses of `host` from public DNS-over-HTTPS servers, [] if none answered. For a provider whose own DNS is
+    broken or lies."""
+    for base in DOH_URLS:
+        try:
+            req = urllib.request.Request(f"{base}?name={host}&type=A",
+                                         headers={"accept": "application/dns-json", "User-Agent": UA})
+            with urlopen(req, timeout=timeout) as r:
+                data = json.loads(r.read(65536).decode("utf-8", "replace"))
+            ips = [a.get("data", "") for a in data.get("Answer", []) if a.get("type") == 1]
+            ips = [ip for ip in ips if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", ip)]
+            if ips:
+                return ips
+        except Exception:  # noqa: BLE001
+            continue
+    return []
+
+
+class _ResolvedHTTPSConnection(http.client.HTTPSConnection):
+    """Connects to a given address but still checks the certificate against the host name."""
+
+    def __init__(self, host, ip, **kw):
+        super().__init__(host, context=ssl_context(), **kw)
+        self._ip = ip
+
+    def connect(self):
+        sock = socket.create_connection((self._ip, self.port), self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+def get_resolved(url, headers, timeout=20, max_bytes=8 * 1024 * 1024, redirects=3):
+    """GET `url` with the address taken from DNS-over-HTTPS instead of the system's DNS. Returns (body bytes, headers
+    with lower-case names). Raises OSError when nothing can be resolved."""
+    u = urlsplit(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise ValueError("неверная ссылка")
+    ips = resolve_doh(u.hostname)
+    if not ips:
+        raise OSError("не получилось узнать адрес сайта ни через DNS провайдера, ни через запасной DNS")
+    path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+    last = None
+    for ip in ips[:3]:
+        try:
+            if u.scheme == "https":
+                c = _ResolvedHTTPSConnection(u.hostname, ip, port=u.port or 443, timeout=timeout)
+            else:
+                c = http.client.HTTPConnection(ip, u.port or 80, timeout=timeout)
+            try:
+                c.request("GET", path, headers={"Host": u.netloc, **headers})
+                r = c.getresponse()
+                if r.status in (301, 302, 303, 307, 308) and redirects > 0 and r.getheader("Location"):
+                    return get_resolved(urljoin(url,r.getheader("Location")), headers, timeout, max_bytes, redirects - 1)
+                if r.status != 200:
+                    raise urllib.error.HTTPError(url, r.status, r.reason, r.headers, None)
+                body = r.read(max_bytes + 1)
+                return body, {k.lower(): v for k, v in r.getheaders()}
+            finally:
+                c.close()
+        except urllib.error.HTTPError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            last = e
+    raise last or OSError("нет ответа")
 
 
 def _open(url, timeout=30):

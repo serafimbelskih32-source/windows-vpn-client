@@ -117,6 +117,13 @@ json.dump(d, open(j, "w"))
 check("a staged update that failed to install too often is dropped", updater.staged(tmp3, "1.1.0") is None)
 
 # ---------- the swap itself ----------
+def content(p):
+    try:
+        return open(p, "rb").read()
+    except OSError:  # a moment inside the swap, when the old file is gone and the new one is not in place yet
+        return None
+
+
 if sys.platform == "win32":
     work = tempfile.mkdtemp(prefix="fimaswap_")
     dst, src = os.path.join(work, "FimaVPN.exe"), os.path.join(work, "new.exe")
@@ -127,7 +134,7 @@ if sys.platform == "win32":
     time.sleep(0.5)
     check("windows: old file stays until the program has exited", open(dst, "rb").read() == b"OLD")
     end = time.time() + 20
-    while time.time() < end and open(dst, "rb").read() != b"NEW":
+    while time.time() < end and content(dst) != b"NEW":
         time.sleep(0.3)
     check("windows: new file swapped in after the program exited", open(dst, "rb").read() == b"NEW")
     check("windows: staged copy removed", not os.path.exists(src))
@@ -180,7 +187,7 @@ if sys.platform == "win32":
     check("windows: ... and no half-copied file is left next to it", not os.path.exists(dst + ".new"))
     updater.apply_windows(src, dst, [], relaunch=False, sha256=hashlib.sha256(b"NEW").hexdigest().upper(), attempts=10)
     end = time.time() + 20
-    while time.time() < end and open(dst, "rb").read() != b"NEW":
+    while time.time() < end and content(dst) != b"NEW":
         time.sleep(0.3)
     check("windows: a file with the right hash replaces it", open(dst, "rb").read() == b"NEW")
     check("windows: ... and the work file is gone", not os.path.exists(dst + ".new") and not os.path.exists(src))
@@ -219,6 +226,80 @@ finally:
 check("the Windows swap helper starts with that environment", seen.get("env") == env, seen.get("env", {}).keys())
 for k in updater._PYI_VARS:
     os.environ.pop(k, None)
+
+# ---------- reaching sites on any system: certificates, causes of failure in plain words, DNS that does not work ----------
+import socket  # noqa: E402
+import ssl  # noqa: E402
+import urllib.error  # noqa: E402
+
+ctx = updater.ssl_context()
+check("ssl_context checks certificates and host names", ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname)
+check("... and trusts something (a system without any certificates fails every https request)",
+      ctx.cert_store_stats().get("x509_ca", 0) > 0 or bool(ctx.get_ca_certs()), ctx.cert_store_stats())
+check("... the same object every time", updater.ssl_context() is ctx)
+real_hook = ssl._create_default_https_context
+updater.trust_certificates()
+check("trust_certificates: http.client and urllib get that context", ssl._create_default_https_context() is ctx)
+ssl._create_default_https_context = real_hook
+
+H = lambda code: urllib.error.HTTPError("https://x/", code, "m", {}, None)  # noqa: E731
+U = urllib.error.URLError
+cases = [
+    (H(403), "отказал в доступе"), (H(404), "ничего нет"), (H(429), "слишком много"), (H(502), "неполадка"),
+    (U(ssl.SSLCertVerificationError(1, "CERTIFICATE_VERIFY_FAILED")), "дату и время"),
+    (U(socket.gaierror(11001, "getaddrinfo failed")), "DNS"),
+    (U(socket.timeout("timed out")), "не ответил"),
+    (socket.timeout("timed out"), "не ответил"),
+    (U(ConnectionRefusedError(61, "refused")), "блокирует провайдер"),
+    (ConnectionResetError(54, "reset"), "блокирует провайдер"),
+    (U(ssl.SSLError("handshake failure")), "защищённое соединение"),
+]
+for exc, word in cases:
+    text = updater.explain(exc)
+    check(f"explain: {type(getattr(exc, 'reason', exc)).__name__}/{getattr(exc, 'code', '')} says what to do ({word!r})", word in text and "Errno" not in text, text)
+check("explain: an unknown error is shown short, never empty", 0 < len(updater.explain(RuntimeError("x" * 500))) <= 160)
+check("is_dns_failure tells a DNS failure from others", updater.is_dns_failure(U(socket.gaierror(-2, "Name or service not known")))
+      and not updater.is_dns_failure(U(socket.timeout("timed out"))) and not updater.is_dns_failure(H(403)))
+
+# DNS-over-HTTPS fallback: a fake resolver and a fake site on localhost
+class Site(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+
+    def do_GET(self):
+        if self.path == "/sub":
+            body = b"vless://example"
+            self.send_response(200); self.send_header("Content-Length", str(len(body))); self.send_header("Profile-Title", "T"); self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/moved":
+            self.send_response(302); self.send_header("Location", "/sub"); self.send_header("Content-Length", "0"); self.end_headers()
+        else:
+            self.send_response(403); self.send_header("Content-Length", "0"); self.end_headers()
+
+
+site = ThreadingHTTPServer(("127.0.0.1", 0), Site)
+threading.Thread(target=site.serve_forever, daemon=True).start()
+sp = site.server_address[1]
+real_doh = updater.resolve_doh
+updater.resolve_doh = lambda host, timeout=6: ["127.0.0.1"]
+try:
+    body, hd = updater.get_resolved(f"http://never-resolves.invalid:{sp}/sub", {"User-Agent": "t"})
+    check("get_resolved: the page is fetched from the address DoH gave, not from DNS", body == b"vless://example" and hd.get("profile-title") == "T", (body, hd))
+    body, _ = updater.get_resolved(f"http://never-resolves.invalid:{sp}/moved", {"User-Agent": "t"})
+    check("... redirects are followed", body == b"vless://example", body)
+    try:
+        updater.get_resolved(f"http://never-resolves.invalid:{sp}/nope", {"User-Agent": "t"})
+        check("... a refusal by the site is reported as such", False)
+    except urllib.error.HTTPError as e:
+        check("... a refusal by the site is reported as such", e.code == 403)
+    updater.resolve_doh = lambda host, timeout=6: []
+    try:
+        updater.get_resolved(f"http://never-resolves.invalid:{sp}/sub", {"User-Agent": "t"})
+        check("no answer from DoH either: a clear error, not a hang", False)
+    except OSError as e:
+        check("no answer from DoH either: a clear error, not a hang", "адрес" in str(e), e)
+finally:
+    updater.resolve_doh = real_doh
+    site.shutdown()
 
 print("\nFAILED:" if fails else "\nALL PASSED", fails if fails else "")
 sys.exit(1 if fails else 0)
