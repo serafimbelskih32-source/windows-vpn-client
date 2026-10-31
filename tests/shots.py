@@ -96,15 +96,21 @@ app.src.insert("1.0", "")
 app.say("")
 shot(app, "00_empty")
 
-app.subs = {"https://sub.example/x": {"outs": vpn.parse_text("\n".join(link(n, i) for i, n in enumerate(NAMES))), "info": {}, "time": time.time(), "ua": "v2rayN/7.0"}}
+xh = (f"vless://{UUID}@10.0.1.1:443?type=xhttp&security=reality&pbk=Y8bq6x0Q4s2v3m3pXw4m0hJq0kQy7Q3v1xk3nq0o3gE&sni=www.microsoft.com"
+      "&fp=chrome&sid=ab12&path=%2F&mode=stream-one#🇳🇱 Нидерланды, XHTTP")
+info = {"title": "Мой провайдер", "usage": {"upload": 20 * 2**30, "download": 250 * 2**30, "total": 300 * 2**30, "expire": int(time.time()) + 40 * 86400}}
+app.subs = {"https://sub.example/x": {"outs": vpn.parse_text("\n".join([link(n, i) for i, n in enumerate(NAMES)] + [xh])), "info": info,
+                                      "time": time.time(), "ua": "v2rayN/7.0"}}
 app.cfg["sources"] = "https://sub.example/x"
 app.src.delete("1.0", "end")
 app.src.insert("1.0", "https://sub.example/x")
 app.apply_outs()
+app.note_subs()
 for i, o in enumerate(app.outs):
     app.results[o["tag"]] = (None, None) if i == 5 else (38.0 + i * 17, 140.0 - i * 9 if i % 4 else -1)
     app.alive[o["tag"]] = i != 5
     app._cell(i, ping=app.results[o["tag"]][0], speed=app.results[o["tag"]][1])
+app.toggle_pin(2)
 app.sort_rows()
 app.say("Самый быстрый: Финляндия (140 Мбит/с, 55 мс). Скорость измерена загрузкой с speed.cloudflare.com.")
 shot(app, "01_main_off")

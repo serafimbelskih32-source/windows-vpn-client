@@ -20,9 +20,13 @@ class Unsupported(Exception):
 # What the user reads when servers had to be left out.
 WHY = {"xhttp": "транспорт XHTTP", "kcp": "транспорт mKCP", "quic": "старый транспорт QUIC", "ssr": "ShadowsocksR",
        "wireguard": "WireGuard", "vless-enc": "шифрование VLESS (encryption)", "tcp-http": "TCP с подменой заголовка HTTP",
-       "naive": "NaiveProxy", "ssh": "SSH", "snell": "Snell", "mieru": "Mieru", "other": "неизвестный протокол"}
+       "naive": "NaiveProxy", "ssh": "SSH", "snell": "Snell", "mieru": "Mieru", "amneziawg": "AmneziaWG",
+       "other": "неизвестный протокол"}
+# The core (sing-box) cannot run these, Xray can: such a server is kept as an "xray" server that a companion Xray
+# process serves on a local port (see engines.py).
+XRAY_REASONS = ("xhttp", "kcp", "tcp-http", "vless-enc")
 
-LINK_SCHEMES = ("vless", "vmess", "trojan", "ss", "ssr", "hysteria2", "hy2", "hysteria", "hy", "tuic", "anytls", "socks",
+LINK_SCHEMES = ("vless", "vmess", "trojan", "ss", "ssr", "ssh", "hysteria2", "hy2", "hysteria", "hy", "tuic", "anytls", "socks",
                 "socks4", "socks5", "wireguard", "wg", "naive+https", "naive+quic")
 LINK_RE = re.compile(r"(?i)(?<![A-Za-z0-9+.-])(" + "|".join(re.escape(s) for s in LINK_SCHEMES) + r")://")
 _INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff\u202a\u202b\u202c\u202d\u202e"), None)
@@ -79,8 +83,6 @@ def _transport(q):
         raise Unsupported("xhttp")
     if typ in ("kcp", "mkcp"):
         raise Unsupported("kcp")
-    if typ == "quic":
-        raise Unsupported("quic")
     path = unquote(_first(q, "path", default="/")) or "/"
     host = _first(q, "host")
     if typ == "ws":
@@ -99,20 +101,94 @@ def _transport(q):
         return {"type": "http", "path": path, "host": [host] if host else []}
     if typ == "httpupgrade":
         return {"type": "httpupgrade", "path": path, "host": host}
+    if typ == "quic":
+        return {"type": "quic"}
     if typ == "tcp" and _first(q, "headerType") == "http":
         raise Unsupported("tcp-http")
     return None
 
 
 def _secure(o, q, host, default_sec="none"):
-    """Add the TLS and transport parts of a link's parameters to the server `o`."""
-    t = _tls(q, host, default_sec)
+    """Add the TLS and transport parts of a link's parameters to the server `o`. What the core cannot run but Xray can
+    (XHTTP, mKCP, an HTTP header on TCP) turns the server into an "xray" one."""
+    try:
+        t = _tls(q, host, default_sec)
+        tr = _transport(q)
+    except Unsupported as e:
+        if str(e) in XRAY_REASONS:
+            return _to_xray(o, q, host, default_sec)
+        raise
     if t:
         o["tls"] = t
-    tr = _transport(q)
     if tr:
         o["transport"] = tr
     return o
+
+
+def _xray_stream(q, host, default_sec="none"):
+    """Xray's `streamSettings` from the link-parameter dict."""
+    net = (_first(q, "type", default="tcp") or "tcp").lower()
+    net = {"splithttp": "xhttp", "mkcp": "kcp", "h2": "http", "raw": "tcp"}.get(net, net)
+    sec = (_first(q, "security", default=default_sec) or default_sec).lower()
+    sec = "tls" if sec == "xtls" else sec
+    ss = {"network": net, "security": sec if sec in ("tls", "reality") else "none"}
+    sni = _first(q, "sni", "peer", "servername") or (_first(q, "host") if net in ("ws", "http", "httpupgrade", "xhttp", "grpc") else "")
+    alpn = [a for a in _first(q, "alpn").split(",") if a]
+    if ss["security"] == "tls":
+        ss["tlsSettings"] = {"serverName": sni or host, "fingerprint": _first(q, "fp", "fingerprint") or "chrome",
+                             "allowInsecure": _flag(_first(q, "allowInsecure", "insecure", "allow_insecure", default="0"))}
+        if alpn:
+            ss["tlsSettings"]["alpn"] = alpn
+    elif ss["security"] == "reality":
+        ss["realitySettings"] = {"serverName": sni or host, "fingerprint": _first(q, "fp", "fingerprint") or "chrome",
+                                 "publicKey": _first(q, "pbk", "publicKey"), "shortId": _first(q, "sid", "shortId"),
+                                 "spiderX": unquote(_first(q, "spx", "spiderX"))}
+    path, hosth = unquote(_first(q, "path", default="/")) or "/", _first(q, "host")
+    if net == "xhttp":
+        x = {"path": path, "mode": _first(q, "mode", default="auto") or "auto"}
+        if hosth:
+            x["host"] = hosth
+        extra = _first(q, "extra")
+        if extra:
+            try:
+                x["extra"] = json.loads(unquote(extra))
+            except ValueError:
+                pass
+        ss["xhttpSettings"] = x
+    elif net == "kcp":
+        ss["kcpSettings"] = {"header": {"type": _first(q, "headerType", default="none") or "none"}}
+        if _first(q, "seed"):
+            ss["kcpSettings"]["seed"] = _first(q, "seed")
+    elif net == "ws":
+        ss["wsSettings"] = {"path": path, "headers": {"Host": hosth} if hosth else {}}
+    elif net == "grpc":
+        ss["grpcSettings"] = {"serviceName": unquote(_first(q, "serviceName", "service_name")), "multiMode": _first(q, "mode") == "multi"}
+    elif net == "http":
+        ss["httpSettings"] = {"path": path, "host": [hosth] if hosth else []}
+    elif net == "httpupgrade":
+        ss["httpupgradeSettings"] = {"path": path, "host": hosth}
+    elif net == "tcp" and _first(q, "headerType") == "http":
+        ss["tcpSettings"] = {"header": {"type": "http", "request": {"path": [path], "headers": {"Host": [hosth] if hosth else []}}}}
+    return ss
+
+
+def _to_xray(o, q, host, default_sec="none", enc="none"):
+    """A server the core cannot run, as an "xray" server: the sing-box-style fields stay (name, address, for lists and
+    ping) and `xray` holds the complete Xray outbound."""
+    proto = o["type"]
+    if proto == "vless":
+        settings = {"vnext": [{"address": o["server"], "port": o["server_port"],
+                               "users": [dict({"id": o.get("uuid", ""), "encryption": enc or "none"},
+                                              **({"flow": o["flow"]} if o.get("flow") else {}))]}]}
+    elif proto == "vmess":
+        settings = {"vnext": [{"address": o["server"], "port": o["server_port"],
+                               "users": [{"id": o.get("uuid", ""), "security": o.get("security") or "auto", "alterId": int(o.get("alter_id") or 0)}]}]}
+    elif proto == "trojan":
+        settings = {"servers": [{"address": o["server"], "port": o["server_port"], "password": o.get("password", "")}]}
+    else:
+        raise Unsupported("other")
+    return {"type": "xray", "tag": o.get("tag", ""), "server": o["server"], "server_port": o["server_port"],
+            "xray": {"protocol": proto, "settings": settings, "streamSettings": _xray_stream(q, host, default_sec)}}
 
 
 def _mbps(v, default):
@@ -208,10 +284,6 @@ def _parse(link, scheme, name):
         return o
     if scheme == "ssr":
         raise Unsupported("ssr")
-    if scheme in ("wireguard", "wg"):
-        raise Unsupported("wireguard")
-    if scheme.startswith("naive"):
-        raise Unsupported("naive")
     u = urlparse(link)
     q = parse_qs(u.query)
     host, port, ranges = _split_ports(u.netloc) if re.search(r":\d+[,;-]", u.netloc) else (u.hostname, u.port, [])
@@ -220,18 +292,52 @@ def _parse(link, scheme, name):
     user, pw = unquote(u.username or ""), unquote(u.password or "")
     if scheme == "vless":
         enc = _first(q, "encryption", default="none")
-        if enc not in ("none", ""):
-            raise Unsupported("vless-enc")
         o = {"type": "vless", "tag": name, "server": host, "server_port": port, "uuid": user, "packet_encoding": "xudp"}
         if _first(q, "flow"):
             o["flow"] = _first(q, "flow")
+        if enc not in ("none", ""):  # VLESS with its own encryption layer: Xray only
+            return _to_xray(o, q, host, "none", enc)
         return _secure(o, q, host)
     if scheme == "trojan":
         o = {"type": "trojan", "tag": name, "server": host, "server_port": port, "password": user}
-        o["tls"] = _tls(q, host, "tls") or {"enabled": True, "server_name": host}
-        tr = _transport(q)
+        try:
+            o["tls"] = _tls(q, host, "tls") or {"enabled": True, "server_name": host}
+            tr = _transport(q)
+        except Unsupported as e:
+            if str(e) in XRAY_REASONS:
+                return _to_xray(o, q, host, "tls")
+            raise
         if tr:
             o["transport"] = tr
+        return o
+    if scheme in ("wireguard", "wg"):
+        pk = unquote(u.username or "")
+        pub = _first(q, "publickey", "public_key", "peer_public_key", "pubkey")
+        addr = [a for a in re.split(r"[,\s]+", _first(q, "address", "ip", "local_address")) if a]
+        if _first(q, "amnezia", "jc", "junk"):
+            raise Unsupported("amneziawg")
+        o = {"type": "wireguard", "tag": name, "server": host, "server_port": port, "local_address": addr or ["10.0.0.2/32"],
+             "private_key": pk, "peer_public_key": pub}
+        if _first(q, "presharedkey", "psk", "pre_shared_key"):
+            o["pre_shared_key"] = _first(q, "presharedkey", "psk", "pre_shared_key")
+        if _first(q, "reserved"):
+            try:
+                o["reserved"] = [int(x) for x in re.split(r"[,\s]+", _first(q, "reserved")) if x][:3]
+            except ValueError:
+                pass
+        if _first(q, "mtu").isdigit():
+            o["mtu"] = int(_first(q, "mtu"))
+        return o
+    if scheme.startswith("naive"):
+        o = {"type": "naive", "tag": name, "server": host, "server_port": port, "username": user, "password": pw,
+             "tls": {"enabled": True, "server_name": _first(q, "sni", default=host)}}
+        if scheme.endswith("quic"):
+            o["quic"] = True
+        return o
+    if scheme == "ssh":
+        o = {"type": "ssh", "tag": name, "server": host, "server_port": port if u.port else 22, "user": user}
+        if pw:
+            o["password"] = pw
         return o
     if scheme in ("hysteria2", "hy2"):
         o = {"type": "hysteria2", "tag": name, "server": host, "server_port": port, "password": user + (":" + pw if pw else ""),
@@ -301,7 +407,8 @@ def _parse(link, scheme, name):
 
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _NEEDS = {"vless": ("uuid",), "vmess": ("uuid",), "tuic": ("uuid",), "trojan": ("password",),
-          "shadowsocks": ("method", "password"), "hysteria2": ("password",), "anytls": ("password",)}
+          "shadowsocks": ("method", "password"), "hysteria2": ("password",), "anytls": ("password",),
+          "wireguard": ("private_key", "peer_public_key"), "naive": ("password",), "ssh": ("user",)}
 _NOT_SERVERS = ("direct", "block", "dns", "selector", "urltest")
 
 
@@ -328,6 +435,12 @@ def valid_outbound(o):
         tls = o.get("tls") or {}
         if "alpn" in tls and (not isinstance(tls["alpn"], list) or not all(isinstance(a, str) and a for a in tls["alpn"])):
             return False
+        if o["type"] == "xray":
+            x = o.get("xray")
+            return isinstance(x, dict) and x.get("protocol") in ("vless", "vmess", "trojan") and isinstance(x.get("settings"), dict)
+        if o["type"] == "wireguard":
+            la = o.get("local_address")
+            return isinstance(la, list) and bool(la) and all(isinstance(a, str) and "/" in a for a in la)
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -385,14 +498,23 @@ def xray_outbound(o, remarks=""):
     tag = remarks or o.get("tag") or ""
     if proto in ("freedom", "blackhole", "dns", "loopback", "direct", "block"):
         return None
+    ss = o.get("streamSettings") if isinstance(o.get("streamSettings"), dict) else {}
+    net = str(ss.get("network") or "tcp").lower()
+    needs_xray = (net in ("xhttp", "splithttp", "kcp", "mkcp") or ((ss.get("tcpSettings") or {}).get("header") or {}).get("type") == "http")
+    if proto in ("vless", "vmess") or proto == "trojan":
+        v0 = ((st.get("vnext") or st.get("servers") or [{}])[0]) if (st.get("vnext") or st.get("servers")) else st
+        u0 = ((v0.get("users") or [{}])[0]) if v0.get("users") else v0
+        if proto == "vless" and str(u0.get("encryption") or "none") not in ("none", ""):
+            needs_xray = True
+        if needs_xray:  # as the provider wrote it: Xray runs it
+            return {"type": "xray", "tag": tag, "server": v0.get("address"), "server_port": int(v0.get("port") or 0),
+                    "xray": {"protocol": proto, "settings": st, "streamSettings": ss}}
     if proto in ("vless", "vmess"):
         v = (st.get("vnext") or [{}])[0] if st.get("vnext") else st
         user = (v.get("users") or [{}])[0] if v.get("users") else v
         host, port = v.get("address"), int(v.get("port") or 0)
         ob = {"type": proto, "tag": tag, "server": host, "server_port": port, "uuid": user.get("id")}
         if proto == "vless":
-            if str(user.get("encryption") or "none") not in ("none", ""):
-                raise Unsupported("vless-enc")
             ob["packet_encoding"] = "xudp"
             if user.get("flow"):
                 ob["flow"] = user["flow"]
@@ -417,8 +539,37 @@ def xray_outbound(o, remarks=""):
             ob["username"], ob["password"] = u["user"], u.get("pass", "")
         return ob
     if proto == "wireguard":
-        raise Unsupported("wireguard")
+        peers = st.get("peers") or [{}]
+        pr = peers[0] if isinstance(peers[0], dict) else {}
+        host, _, port = str(pr.get("endpoint") or "").rpartition(":")
+        ob = {"type": "wireguard", "tag": tag, "server": host.strip("[]"), "server_port": int(port or 0),
+              "local_address": [st["address"]] if isinstance(st.get("address"), str) else list(st.get("address") or []),
+              "private_key": st.get("secretKey"), "peer_public_key": pr.get("publicKey")}
+        if pr.get("preSharedKey"):
+            ob["pre_shared_key"] = pr["preSharedKey"]
+        if isinstance(st.get("reserved"), list):
+            ob["reserved"] = [int(x) for x in st["reserved"]][:3]
+        if st.get("mtu"):
+            ob["mtu"] = int(st["mtu"])
+        return ob
     return None
+
+
+def wg_from_endpoint(e):
+    """A sing-box WireGuard `endpoint` as the outbound-style server this program keeps."""
+    peers = e.get("peers") if isinstance(e.get("peers"), list) and e.get("peers") else [{}]
+    pr = peers[0] if isinstance(peers[0], dict) else {}
+    addr = e.get("address")
+    o = {"type": "wireguard", "tag": str(e.get("tag") or ""), "server": pr.get("address"), "server_port": int(pr.get("port") or 0),
+         "local_address": [addr] if isinstance(addr, str) else list(addr or []), "private_key": e.get("private_key"),
+         "peer_public_key": pr.get("public_key")}
+    if pr.get("pre_shared_key"):
+        o["pre_shared_key"] = pr["pre_shared_key"]
+    if isinstance(pr.get("reserved"), list):
+        o["reserved"] = pr["reserved"]
+    if e.get("mtu"):
+        o["mtu"] = e["mtu"]
+    return o
 
 
 # ---------- Clash / Mihomo ----------
@@ -570,11 +721,17 @@ def clash_outbound(p):
                  alter_id=int(p.get("alterId") or 0))
         return _secure(o, q, host)
     if typ == "vless":
-        if str(p.get("encryption") or "") not in ("", "none"):
-            raise Unsupported("vless-enc")
         o = dict(base, type="vless", uuid=str(p.get("uuid") or ""), packet_encoding="xudp")
         if p.get("flow"):
             o["flow"] = str(p["flow"])
+        enc = str(p.get("encryption") or "")
+        if enc not in ("", "none"):
+            return _to_xray(o, q, host, q["security"][0], enc)
+        if net in ("xhttp", "splithttp"):  # Mihomo's own XHTTP options
+            xo = p.get("xhttp-opts") or {}
+            q["path"] = [xo.get("path") or "/"]
+            q["host"] = [xo.get("host") or ""]
+            q["mode"] = [xo.get("mode") or "auto"]
         return _secure(o, q, host)
     if typ == "trojan":
         o = dict(base, type="trojan", password=str(p.get("password") or ""))
@@ -622,10 +779,27 @@ def clash_outbound(p):
             o["username"], o["password"] = str(p["username"]), str(p.get("password") or "")
         return o
     if typ == "wireguard":
-        raise Unsupported("wireguard")
+        if p.get("amnezia-wg-option"):
+            raise Unsupported("amneziawg")
+        addr = [str(a) if "/" in str(a) else str(a) + ("/128" if ":" in str(a) else "/32")
+                for a in (p.get("ip"), p.get("ipv6")) if a]
+        o = dict(base, type="wireguard", local_address=addr or ["10.0.0.2/32"], private_key=str(p.get("private-key") or ""),
+                 peer_public_key=str(p.get("public-key") or ""))
+        if p.get("pre-shared-key"):
+            o["pre_shared_key"] = str(p["pre-shared-key"])
+        if isinstance(p.get("reserved"), list):
+            o["reserved"] = [int(x) for x in p["reserved"]][:3]
+        if p.get("mtu"):
+            o["mtu"] = int(p["mtu"])
+        return o
     if typ == "ssr":
         raise Unsupported("ssr")
-    if typ in ("ssh", "snell", "mieru"):
+    if typ == "ssh":
+        o = dict(base, type="ssh", user=str(p.get("username") or ""))
+        if p.get("password"):
+            o["password"] = str(p["password"])
+        return o
+    if typ in ("snell", "mieru"):
         raise Unsupported(typ)
     if typ in ("http", "direct", "reject", "dns", ""):
         return None
@@ -680,6 +854,10 @@ def _from_json(data, skipped, remarks=""):
                 outs.append(clean_outbound(x))
         for x in proxies:
             add(xray_outbound, x, remarks if len(proxies) == 1 else "")
+    if isinstance(data.get("endpoints"), list):
+        for e in data["endpoints"]:
+            if isinstance(e, dict) and e.get("type") == "wireguard":
+                add(wg_from_endpoint, e)
     if isinstance(data.get("servers"), list):
         for s in data["servers"]:
             if isinstance(s, dict) and (s.get("server") or s.get("password")):

@@ -10,6 +10,7 @@ permissions:
 
 env:
   SINGBOX_VERSION: "1.13.14"
+  XRAY_VERSION: "v26.10.29"
 
 jobs:
   build:
@@ -18,11 +19,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: windows,      os: windows-latest,   core: windows-amd64, asset: FimaVPN.exe }
-          - { name: linux-x86_64, os: ubuntu-22.04,     core: linux-amd64,   asset: FimaVPN-linux-x86_64 }
-          - { name: linux-arm64,  os: ubuntu-22.04-arm, core: linux-arm64,   asset: FimaVPN-linux-arm64 }
-          - { name: macos-arm64,  os: macos-15,         core: darwin-arm64,  asset: FimaVPN-macos-arm64.zip }
-          - { name: macos-x86_64, os: macos-15-intel,   core: darwin-amd64,  asset: FimaVPN-macos-x86_64.zip }
+          - { name: windows,      os: windows-latest,   core: windows-amd64, xray: windows-64, asset: FimaVPN.exe }
+          - { name: linux-x86_64, os: ubuntu-22.04,     core: linux-amd64,  xray: linux-64,  asset: FimaVPN-linux-x86_64 }
+          - { name: linux-arm64,  os: ubuntu-22.04-arm, core: linux-arm64,  xray: linux-arm64-v8a,  asset: FimaVPN-linux-arm64 }
+          - { name: macos-arm64,  os: macos-15,         core: darwin-arm64, xray: macos-arm64-v8a, asset: FimaVPN-macos-arm64.zip }
+          - { name: macos-x86_64, os: macos-15-intel,   core: darwin-amd64, xray: macos-64, asset: FimaVPN-macos-x86_64.zip }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -66,6 +67,22 @@ jobs:
           fi
           ls -la core
 
+      - name: Download Xray (it runs what the core cannot: XHTTP and the like)
+        shell: bash
+        run: |
+          set -e
+          X="$XRAY_VERSION"
+          curl -sSL --fail -o xray.zip "https://github.com/XTLS/Xray-core/releases/download/$X/Xray-${{ matrix.xray }}.zip"
+          curl -sSL --fail -o xray.dgst "https://github.com/XTLS/Xray-core/releases/download/$X/Xray-${{ matrix.xray }}.zip.dgst"
+          WANT=$(grep -i "SHA2-256" xray.dgst | head -1 | sed 's/.*= *//' | tr -d '\r ')
+          if [ "$RUNNER_OS" = "macOS" ]; then GOT=$(shasum -a 256 xray.zip | cut -d' ' -f1); else GOT=$(sha256sum xray.zip | cut -d' ' -f1); fi
+          echo "published: $WANT"; echo "downloaded: $GOT"
+          test "$WANT" = "$GOT"
+          mkdir -p xr && unzip -q -o xray.zip -d xr
+          if [ "$RUNNER_OS" = "Windows" ]; then cp xr/xray.exe core/xray.exe; else cp xr/xray core/xray; chmod +x core/xray; fi
+          cp xr/LICENSE core/XRAY-LICENSE
+          ls -la core
+
       - name: Python packages and icons
         run: pip install pillow pystray certifi pyyaml && python make_icon.py
 
@@ -77,9 +94,10 @@ jobs:
           python tests/test_tray.py
           python tests/test_supervisor.py
           python tests/test_sources.py
+          python tests/test_engines.py
           python tests/test_robust.py
           # the window-level suite hangs inside Tk's update() on the macOS runner (not understood yet): Windows and Linux only
-          if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python tests/test_app.py; xvfb-run -a python tests/test_design.py; elif [ "$RUNNER_OS" = "Windows" ]; then python tests/test_app.py; python tests/test_design.py; fi
+          if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python tests/test_app.py; xvfb-run -a python tests/test_design.py; xvfb-run -a python tests/test_features.py; elif [ "$RUNNER_OS" = "Windows" ]; then python tests/test_app.py; python tests/test_design.py; python tests/test_features.py; fi
           python vpn.py --selftest < tests/sample_links.txt
           if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python tests/gui_smoke.py; else python tests/gui_smoke.py; fi
 
@@ -113,7 +131,7 @@ jobs:
             pyinstaller --noconfirm --windowed --name FimaVPN --icon icon.icns \
               --collect-submodules pystray --collect-data certifi --add-data "core:core" --add-data "icon.png:." vpn.py
             # ad-hoc signature: Apple Silicon refuses to run unsigned code
-            find dist/FimaVPN.app -name sing-box -type f -exec codesign --force -s - {} \;
+            find dist/FimaVPN.app \( -name sing-box -o -name xray \) -type f -exec codesign --force -s - {} \;
             codesign --force --deep -s - dist/FimaVPN.app
             ditto -c -k --sequesterRsrc --keepParent dist/FimaVPN.app "dist/${{ matrix.asset }}"
           else

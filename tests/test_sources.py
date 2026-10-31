@@ -41,12 +41,25 @@ o, _ = one(f"vless://{U}@h.example:443?type=grpc&serviceName=svc&security=tls&sn
 check("vless grpc", o and o["transport"] == {"type": "grpc", "service_name": "svc"}, o)
 o, _ = one(f"vless://{U}@h.example:443?type=httpupgrade&path=/u&host=a.com&security=tls#h")
 check("vless httpupgrade", o and o["transport"]["type"] == "httpupgrade" and o["transport"]["path"] == "/u", o)
-o, sk = one(f"vless://{U}@h.example:443?type=xhttp&security=reality&pbk=K&sni=a.com#x")
-check("vless xhttp: not run broken but left out, with the reason", o is None and sk == {"xhttp": 1}, (o, sk))
+o, sk = one(f"vless://{U}@h.example:443?type=xhttp&security=reality&pbk=K&sid=ab&sni=a.com&fp=chrome&path=%2Fx&host=cdn.a.com&mode=packet-up&extra=%7B%22xPaddingBytes%22%3A%22100-1000%22%7D#x")
+check("vless xhttp is an Xray server: the whole Xray outbound is kept, with reality, path, host, mode and extra",
+      o and o["type"] == "xray" and o["server"] == "h.example" and sk == {}
+      and o["xray"]["streamSettings"]["network"] == "xhttp" and o["xray"]["streamSettings"]["realitySettings"]["publicKey"] == "K"
+      and o["xray"]["streamSettings"]["xhttpSettings"] == {"path": "/x", "mode": "packet-up", "host": "cdn.a.com", "extra": {"xPaddingBytes": "100-1000"}}
+      and o["xray"]["settings"]["vnext"][0]["users"][0]["id"] == U, o)
+o, sk = one(f"vless://{U}@h.example:443?type=splithttp&security=tls&sni=a.com#old-name")
+check("the old name of XHTTP (splithttp) is the same thing", o and o["type"] == "xray" and o["xray"]["streamSettings"]["network"] == "xhttp", o)
 o, sk = one(f"vless://{U}@h.example:443?encryption=mlkem768x25519plus.native.0rtt.KEY&security=tls#e")
-check("vless with its own encryption layer: left out, with the reason", o is None and sk == {"vless-enc": 1}, (o, sk))
-o, sk = one(f"vless://{U}@h.example:443?type=kcp&security=none#k")
-check("mKCP is left out", o is None and sk == {"kcp": 1}, sk)
+check("vless with its own encryption layer is an Xray server too (the key is kept)",
+      o and o["type"] == "xray" and o["xray"]["settings"]["vnext"][0]["users"][0]["encryption"].startswith("mlkem768"), o)
+o, sk = one(f"vless://{U}@h.example:443?type=kcp&headerType=wechat-video&seed=s3&security=none#k")
+check("mKCP is an Xray server (header and seed kept)", o and o["type"] == "xray" and o["xray"]["streamSettings"]["kcpSettings"] == {"header": {"type": "wechat-video"}, "seed": "s3"}, o)
+o, sk = one("trojan://pw@t.example:443?type=xhttp&sni=a.com&path=/t#tx")
+check("trojan over XHTTP is an Xray server", o and o["type"] == "xray" and o["xray"]["protocol"] == "trojan" and o["xray"]["settings"]["servers"][0]["password"] == "pw", o)
+o, sk = one(f"vless://{U}@h.example:443?type=tcp&headerType=http&host=a.com&path=/p#th")
+check("TCP with an HTTP header is an Xray server", o and o["type"] == "xray" and o["xray"]["streamSettings"]["tcpSettings"]["header"]["type"] == "http", o)
+o, sk = one(f"vless://{U}@h.example:443?type=quic&security=tls&sni=a.com#q")
+check("the core's own QUIC transport is used, not skipped", o and o["type"] == "vless" and o["transport"] == {"type": "quic"}, o)
 o, _ = one(f"vless://{U}@[2001:db8::1]:443?security=tls&sni=a.com#v6")
 check("an IPv6 address", o and o["server"] == "2001:db8::1" and o["server_port"] == 443, o)
 o, _ = one(f"  ​vless://{U}@h.example:443?security=tls#sp​ ")
@@ -61,8 +74,9 @@ check("vmess (base64 JSON): ws, tls, host, port as text", o and o["tag"] == "VM 
       and o["transport"]["headers"]["Host"] == "cdn.vm.example" and o["tls"]["server_name"] == "cdn.vm.example", o)
 o, _ = one("vmess://" + b64u(json.dumps(vm)) + "#ignored")
 check("vmess with url-safe base64 and no padding", o and o["server"] == "vm.example", o)
-o, sk = one("vmess://" + b64(json.dumps(dict(vm, net="kcp"))))
-check("vmess over mKCP is left out", o is None and sk == {"kcp": 1}, (o, sk))
+o, sk = one("vmess://" + b64(json.dumps(dict(vm, net="kcp", type="srtp"))))
+check("vmess over mKCP is an Xray server", o and o["type"] == "xray" and o["xray"]["protocol"] == "vmess"
+      and o["xray"]["streamSettings"]["network"] == "kcp", (o, sk))
 o, _ = one(f"vmess://{U}@vm.example:443?type=ws&security=tls&host=a.com&path=/x&encryption=auto#url-form")
 check("vmess in the newer URL form", o and o["uuid"] == U and o["transport"]["type"] == "ws", o)
 
@@ -103,8 +117,18 @@ o, _ = one("socks5://user:pw@sock.example:1080#s5")
 check("socks5 with a login", o and o["type"] == "socks" and o["username"] == "user" and o["version"] == "5", o)
 o, _ = one("socks://" + b64("user:pw") + "@sock.example:1080#v2rayn")
 check("socks with base64 login (v2rayN)", o and o["username"] == "user" and o["password"] == "pw", o)
-o, sk = one("wireguard://KEY@wg.example:51820?address=10.0.0.2/32#wg")
-check("WireGuard is left out, with the reason", o is None and sk == {"wireguard": 1}, sk)
+WGK = "mHk5Q0hcX0xx6dWjLrU2uHk3WqZ0eB0a1Jq0k3x0v1U="
+o, sk = one(f"wireguard://{WGK.replace('=', '%3D')}@wg.example:51820?publickey={WGK.replace('=', '%3D')}&address=10.0.0.2/32,fd00::2/128&mtu=1280&reserved=1,2,3#wg")
+check("WireGuard link: keys, addresses, reserved bytes, mtu", o and o["type"] == "wireguard" and o["private_key"] == WGK and o["local_address"] == ["10.0.0.2/32", "fd00::2/128"]
+      and o["reserved"] == [1, 2, 3] and o["mtu"] == 1280 and o["server_port"] == 51820, o)
+o, sk = one("wireguard://KEY@wg.example:51820?address=10.0.0.2/32#no-peer-key")
+check("a WireGuard link without the server's key is not a server", o is None, o)
+o, sk = one(f"wireguard://{WGK}@wg.example:51820?publickey={WGK}&address=10.0.0.2/32&jc=4&jmin=40#awg")
+check("AmneziaWG is left out, with the reason (the core has no such option)", o is None and sk == {"amneziawg": 1}, (o, sk))
+o, sk = one("naive+https://user:pw@nv.example:443#naive")
+check("NaiveProxy", o and o["type"] == "naive" and o["username"] == "user" and o["tls"]["server_name"] == "nv.example", o)
+o, sk = one("ssh://root:pw@ssh.example:2222#ssh")
+check("SSH", o and o["type"] == "ssh" and o["server_port"] == 2222 and o["user"] == "root" and o["password"] == "pw", o)
 o, _ = one(f"vless://{U}@h.example:0?security=tls#zero")
 check("port 0 is not a server", o is None)
 
@@ -112,12 +136,12 @@ check("port 0 is not a server", o is None)
 LINKS = "\n".join([f"vless://{U}@a.example:443?security=tls&sni=a.com#A", "trojan://pw@b.example:443#B",
                    "hysteria2://pw@c.example:443#C", f"vless://{U}@x.example:443?type=xhttp#X"])
 outs, sk = S.parse_text_ex(LINKS)
-check("a plain list: the runnable ones come out, the other is counted", [o["tag"] for o in outs] == ["A", "B", "C"] and dict(sk) == {"xhttp": 1}, (outs, sk))
-check("the same as base64", [o["tag"] for o in S.parse_text(b64(LINKS))] == ["A", "B", "C"])
-check("... url-safe, without padding", [o["tag"] for o in S.parse_text(b64u(LINKS))] == ["A", "B", "C"])
+check("a plain list: every server comes out, the XHTTP one as an Xray server", [o["tag"] for o in outs] == ["A", "B", "C", "X"] and outs[3]["type"] == "xray" and not sk, (outs, sk))
+check("the same as base64", [o["tag"] for o in S.parse_text(b64(LINKS))] == ["A", "B", "C", "X"])
+check("... url-safe, without padding", [o["tag"] for o in S.parse_text(b64u(LINKS))] == ["A", "B", "C", "X"])
 wrapped = "\n".join(b64(LINKS)[i:i + 76] for i in range(0, len(b64(LINKS)), 76))
-check("... wrapped in lines of 76 characters", [o["tag"] for o in S.parse_text(wrapped)] == ["A", "B", "C"])
-check("a BOM and a blank line first do not matter", len(S.parse_text("﻿\n\n" + LINKS)) == 3)
+check("... wrapped in lines of 76 characters", [o["tag"] for o in S.parse_text(wrapped)] == ["A", "B", "C", "X"])
+check("a BOM and a blank line first do not matter", len(S.parse_text("﻿\n\n" + LINKS)) == 4)
 
 sb = {"outbounds": [{"type": "selector", "tag": "sel", "outbounds": ["A"]}, {"type": "direct", "tag": "direct"},
                     {"type": "vless", "tag": "SB", "server": "sb.example", "server_port": 443, "uuid": U, "detour": "x"}]}
@@ -138,15 +162,35 @@ xray3 = {"remarks": "Xray 3", "outbounds": [
     {"protocol": "vless", "settings": {"vnext": [{"address": "h.example", "port": 443, "users": [{"id": U}]}]},
      "streamSettings": {"network": "xhttp", "security": "tls"}}]}
 outs, sk = S.parse_text_ex(json.dumps([xray, xray2, xray3]))
-check("an array of Xray configs (Remnawave): names from 'remarks', reality and ws+tls read, xhttp counted",
-      [o["tag"] for o in outs] == ["Xray 1", "Xray 2"] and outs[0]["tls"]["reality"]["public_key"] == "PK"
+check("an array of Xray configs (Remnawave): names from 'remarks', reality and ws+tls read, xhttp kept for Xray as written",
+      [o["tag"] for o in outs] == ["Xray 1", "Xray 2", "Xray 3"] and outs[0]["tls"]["reality"]["public_key"] == "PK"
       and outs[0]["flow"] == "xtls-rprx-vision" and outs[1]["transport"]["path"] == "/w" and outs[1]["tls"]["alpn"] == ["h2", "http/1.1"]
-      and dict(sk) == {"xhttp": 1}, (outs, sk))
+      and outs[2]["type"] == "xray" and outs[2]["xray"]["streamSettings"] == {"network": "xhttp", "security": "tls"} and not sk, (outs, sk))
 check("one Xray config (not an array)", [o["tag"] for o in S.parse_text(json.dumps(xray))] == ["Xray 1"])
 trojan_x = {"outbounds": [{"protocol": "trojan", "tag": "T", "settings": {"servers": [{"address": "t.example", "port": 443, "password": "pw"}]},
                            "streamSettings": {"network": "tcp", "security": "tls", "tlsSettings": {"serverName": "t.example"}}},
                           {"protocol": "shadowsocks", "tag": "S", "settings": {"servers": [{"address": "s.example", "port": 8388, "method": "aes-128-gcm", "password": "p"}]}}]}
 check("Xray trojan and shadowsocks", [o["type"] for o in S.parse_text(json.dumps(trojan_x))] == ["trojan", "shadowsocks"])
+
+xhttp_json = {"remarks": "Provider XHTTP", "outbounds": [
+    {"protocol": "vless", "tag": "proxy", "settings": {"vnext": [{"address": "xh.example", "port": 443, "users": [{"id": U, "encryption": "none", "flow": ""}]}]},
+     "streamSettings": {"network": "xhttp", "security": "reality", "realitySettings": {"serverName": "www.m.com", "publicKey": "PK", "shortId": "ab", "fingerprint": "chrome"},
+                        "xhttpSettings": {"path": "/p", "mode": "stream-up", "extra": {"headers": {"X-A": "1"}, "xmux": {"maxConcurrency": "16-32"}}}},
+     "mux": {"enabled": False}}]}
+outs = S.parse_text(json.dumps(xhttp_json))
+check("an Xray config with XHTTP is passed to Xray exactly as the provider wrote it (extra and all), without mux",
+      len(outs) == 1 and outs[0]["type"] == "xray" and outs[0]["tag"] == "Provider XHTTP" and outs[0]["xray"]["streamSettings"]["xhttpSettings"]["extra"]["xmux"] == {"maxConcurrency": "16-32"}
+      and "mux" not in outs[0]["xray"], outs)
+wg_end = {"endpoints": [{"type": "wireguard", "tag": "WG end", "address": ["10.0.0.2/32"], "private_key": WGK, "mtu": 1280,
+                         "peers": [{"address": "wg.example", "port": 51820, "public_key": WGK, "allowed_ips": ["0.0.0.0/0"], "reserved": [1, 2, 3]}]}],
+          "outbounds": [{"type": "direct", "tag": "direct"}]}
+outs = S.parse_text(json.dumps(wg_end))
+check("a sing-box WireGuard endpoint becomes a server", len(outs) == 1 and outs[0]["type"] == "wireguard" and outs[0]["server"] == "wg.example"
+      and outs[0]["reserved"] == [1, 2, 3] and outs[0]["local_address"] == ["10.0.0.2/32"], outs)
+wg_x = {"outbounds": [{"protocol": "wireguard", "tag": "w", "settings": {"secretKey": WGK, "address": ["10.0.0.2/32"], "mtu": 1280,
+                                                                          "peers": [{"publicKey": WGK, "endpoint": "wgx.example:51820"}]}}]}
+outs = S.parse_text(json.dumps(wg_x))
+check("an Xray WireGuard outbound becomes a server", len(outs) == 1 and outs[0]["server"] == "wgx.example" and outs[0]["server_port"] == 51820, outs)
 
 sip = {"version": 1, "servers": [{"server": "ss1.example", "server_port": 8388, "password": "pw", "method": "aes-256-gcm", "remarks": "SIP 1"},
                                  {"server": "ss2.example", "server_port": 8389, "password": "pw", "method": "chacha20-ietf-poly1305"}]}
@@ -161,19 +205,30 @@ proxies:
   - {{name: TR, type: trojan, server: tr.example, port: 443, password: pw, sni: a.com, skip-cert-verify: true}}
   - {{name: HY2, type: hysteria2, server: hy.example, port: 443, password: pw, sni: a.com, up: "100 Mbps", down: "200 Mbps"}}
   - {{name: TUIC, type: tuic, server: tu.example, port: 443, uuid: {U}, password: pw, alpn: [h3], congestion-controller: bbr}}
-  - {{name: WG, type: wireguard, server: wg.example, port: 51820, private-key: x}}
+  - {{name: WG, type: wireguard, server: wg.example, port: 51820, private-key: {WGK}, public-key: {WGK}, ip: 10.0.0.2, reserved: [1, 2, 3]}}
 proxy-groups:
   - {{name: auto, type: url-test, proxies: ["SS 1"]}}
 """
 outs, sk = S.parse_text_ex(CLASH_FLOW)
-check("Clash, one-line entries (no YAML library needed): ss+obfs, vmess ws, vless reality, trojan, hysteria2, tuic",
-      [o["tag"] for o in outs] == ["SS 1", "VM ws", "VL reality", "TR", "HY2", "TUIC"] and dict(sk) == {"wireguard": 1}, ([o["tag"] for o in outs], sk))
+check("Clash, one-line entries (no YAML library needed): ss+obfs, vmess ws, vless reality, trojan, hysteria2, tuic, WireGuard",
+      [o["tag"] for o in outs] == ["SS 1", "VM ws", "VL reality", "TR", "HY2", "TUIC", "WG"] and not sk, ([o["tag"] for o in outs], sk))
 byname = {o["tag"]: o for o in outs}
 check("... the details survive: obfs plugin, ws headers, reality key, skip-cert-verify, speeds, alpn",
       byname["SS 1"]["plugin"] == "obfs-local" and "obfs-host=bing.com" in byname["SS 1"]["plugin_opts"]
       and byname["VM ws"]["transport"]["headers"]["Host"] == "cdn.example" and byname["VL reality"]["tls"]["reality"]["public_key"] == "PK"
       and byname["TR"]["tls"]["insecure"] and byname["HY2"]["up_mbps"] == 100 and byname["TUIC"]["tls"]["alpn"] == ["h3"], byname)
 check("a proxy group is not a server", "auto" not in byname)
+check("Clash WireGuard: keys, address from ip, reserved bytes", byname["WG"]["type"] == "wireguard" and byname["WG"]["local_address"] == ["10.0.0.2/32"]
+      and byname["WG"]["reserved"] == [1, 2, 3], byname.get("WG"))
+CLASH_X = f"""proxies:
+  - {{name: "CX", type: vless, server: cx.example, port: 443, uuid: {U}, tls: true, network: xhttp, servername: www.m.com, client-fingerprint: chrome, reality-opts: {{public-key: PK, short-id: ab}}, xhttp-opts: {{path: /cx, mode: packet-up, host: h.a.com}}}}
+  - {{name: "CE", type: vless, server: ce.example, port: 443, uuid: {U}, tls: true, encryption: "mlkem768x25519plus.native.0rtt.KEY", servername: ce.example}}
+  - {{name: "SSHX", type: ssh, server: sx.example, port: 22, username: root, password: pw}}
+"""
+outs = S.parse_text(CLASH_X)
+check("Clash: XHTTP (xhttp-opts), VLESS encryption and SSH", [o["type"] for o in outs] == ["xray", "xray", "ssh"]
+      and outs[0]["xray"]["streamSettings"]["xhttpSettings"] == {"path": "/cx", "mode": "packet-up", "host": "h.a.com"}
+      and outs[1]["xray"]["settings"]["vnext"][0]["users"][0]["encryption"].startswith("mlkem"), outs)
 
 CLASH_BLOCK = f"""proxies:
   - name: "Block 1"
@@ -230,12 +285,12 @@ link = f"vless://{U}@h.example:443?security=tls#My Server (2)"
 check("a share link keeps its whole name, spaces and brackets", S.source_lines(link) == [link], S.source_lines(link))
 urls, rest = S.split_sources(f"{SUB}\n{link}\n{b64(LINKS)[:40]}")
 check("split: addresses and the rest", urls == [SUB] and len(rest) == 2, (urls, rest))
-outs, sk = S.parse_inline([link, "trojan://pw@b.example:443#B", f"vless://{U}@x.example:443?type=xhttp#X"])
-check("pasted share links: parsed one by one, the unsupported one counted", len(outs) == 2 and dict(sk) == {"xhttp": 1}, (outs, sk))
+outs, sk = S.parse_inline([link, "trojan://pw@b.example:443#B", f"vless://{U}@x.example:443?type=xhttp#X", "ssr://" + b64("h:1:o:m:p:cGFzcw")])
+check("pasted share links: parsed one by one, the one nobody can run is counted", len(outs) == 3 and dict(sk) == {"ssr": 1}, (outs, sk))
 chunks = [b64(LINKS)[i:i + 40] for i in range(0, len(b64(LINKS)), 40)]
-check("a pasted base64 blob that spans several lines is read as one", [o["tag"] for o in S.parse_inline(chunks)[0]] == ["A", "B", "C"])
+check("a pasted base64 blob that spans several lines is read as one", [o["tag"] for o in S.parse_inline(chunks)[0]] == ["A", "B", "C", "X"])
 check("a mix: a link line and a base64 blob together",
-      len(S.parse_inline([link] + chunks)[0]) == 4, len(S.parse_inline([link] + chunks)[0]))
+      len(S.parse_inline([link] + chunks)[0]) == 5, len(S.parse_inline([link] + chunks)[0]))
 
 # ---------- never an exception, whatever comes ----------
 import random  # noqa: E402

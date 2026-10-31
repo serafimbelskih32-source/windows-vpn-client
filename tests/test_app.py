@@ -26,6 +26,8 @@ vpn.RULES_DIR = os.path.join(TMP, "rules")
 vpn.LOGFILE = os.path.join(TMP, "sing-box.log")
 vpn.kill_stale_cores = lambda *a, **k: 0  # never touch the real running core in tests
 vpn.detect_home = lambda *a, **k: None  # nor start a real core to ask which country the machine is in
+vpn.PRO_FIELDS["merge_subs"] = (False, "bool", None)  # this suite counts requests per User-Agent: one answer per subscription (merging has its own test)
+vpn.PRO_DEFAULTS["merge_subs"] = False
 
 fails = []
 

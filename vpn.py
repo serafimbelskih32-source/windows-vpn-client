@@ -27,6 +27,7 @@ from tkinter import messagebox, ttk
 from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 import http.client
 
+import engines
 import flags
 import tray
 import updater
@@ -76,11 +77,22 @@ os.makedirs(DATA, exist_ok=True)
 BASE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 CORE_DIR = os.path.join(BASE, "core")
 CORE = os.path.join(CORE_DIR, "sing-box.exe" if IS_WIN else "sing-box")
+XRAY = os.path.join(CORE_DIR, "xray.exe" if IS_WIN else "xray")  # the companion for what the core cannot run (XHTTP...)
+XRAYCFG = os.path.join(DATA, "xray.json")
+XRAYLOG = os.path.join(DATA, "xray.log")
+XRAYTESTCFG = os.path.join(DATA, "xray-test.json")
+XRAYTESTLOG = os.path.join(DATA, "xray-test.log")
+XRAY_PORT = engines.XRAY_BASE_PORT  # local ports of the companion while connected
+XRAY_TEST_PORT = engines.XRAY_BASE_PORT + 300  # ... and while the servers are tested
 NOWIN = 0x08000000 if IS_WIN else 0  # CREATE_NO_WINDOW
 MIXED_PORT = 2080
 if not IS_WIN:
     try:
         os.chmod(CORE, 0o755)  # bundled data files may lose the executable bit
+    except OSError:
+        pass
+    try:
+        os.chmod(XRAY, 0o755)
     except OSError:
         pass
 
@@ -262,6 +274,44 @@ def split_sources(src: str):
     return urls, inline
 
 
+def human_bytes(n):
+    """12 ГБ, 1,5 ТБ, 340 МБ: what a person reads."""
+    n = float(n)
+    for unit, size in (("ТБ", 1 << 40), ("ГБ", 1 << 30), ("МБ", 1 << 20)):
+        if n >= size:
+            v = n / size
+            return (f"{v:.0f}" if v >= 100 else f"{v:.1f}".replace(".", ",").removesuffix(",0")) + " " + unit
+    return f"{n / 1024:.0f} КБ" if n >= 1024 else f"{n:.0f} Б"
+
+
+def usage_line(info, host, now=None):
+    """('gamededio.com: осталось 120 ГБ из 300 ГБ, до 12.12.2026', needs attention) from what the provider reports about
+    a subscription, or ('', False) if it reports nothing worth showing."""
+    now = time.time() if now is None else now
+    u = (info or {}).get("usage") or {}
+    used = int(u.get("upload", 0)) + int(u.get("download", 0))
+    total, expire = int(u.get("total", 0)), int(u.get("expire", 0))
+    parts, warn = [], False
+    if total > 0:
+        left = max(0, total - used)
+        parts.append(f"осталось {human_bytes(left)} из {human_bytes(total)}")
+        warn = warn or left <= total * 0.1
+    elif used > 0:
+        parts.append(f"использовано {human_bytes(used)}")
+    if expire > 0:
+        days = (expire - now) / 86400
+        if days < 0:
+            parts.append("срок вышел")
+            warn = True
+        else:
+            parts.append("до " + time.strftime("%d.%m.%Y", time.localtime(expire)) + (f" (ещё {int(days) + (1 if days > int(days) else 0)} дн.)" if days <= 7 else ""))
+            warn = warn or days <= 3
+    if not parts:
+        return "", False
+    name = str((info or {}).get("title") or host or "подписка")[:40]
+    return f"{name}: " + ", ".join(parts), warn
+
+
 def sub_info(headers):
     """Provider metadata from subscription response headers (interval in hours, usage, title)."""
     info = {}
@@ -289,13 +339,24 @@ def sub_info(headers):
     return info
 
 
-def fetch_source(url, prefer=None, via=None):
+def server_key(o):
+    """Identity of a server across formats: the same one listed for different clients has a different name but the same
+    address, port and credentials."""
+    tls = o.get("tls") or {}
+    return (o.get("type"), o.get("server"), o.get("server_port"), o.get("uuid") or o.get("password") or o.get("auth_str") or o.get("private_key") or "",
+            json.dumps(o.get("transport") or o.get("xray", {}).get("streamSettings") or "", sort_keys=True, default=str),  # many "servers" of one host differ only here
+            tls.get("server_name"), (tls.get("reality") or {}).get("short_id"))
+
+
+def fetch_source(url, prefer=None, via=None, merge=False):
     """Fetch one subscription, trying the UA that worked last time first, then (if a VPN of ours is up) through it.
-    Returns (outs, info, ua, errors)."""
+    With `merge`, every User-Agent that gets an answer is used and the servers of all answers are kept (one provider gave
+    81 servers to one client and 35, with Hysteria2, to another). Returns (outs, info, ua, errors)."""
     errors = []
+    got = []  # (outs, info, ua) of each answer, when merging
     host = urlsplit(url).hostname or "подписка"  # the path holds the user's key: never shown
     for route in ((None, via) if via else (None,)):
-        for ua in sorted(UAS, key=lambda u: u != prefer):
+        for ua in sorted(UAS[:3] if merge else UAS, key=lambda u: u != prefer):
             try:
                 body, headers = fetch(url, ua, route)
             except Exception as e:  # noqa: BLE001
@@ -310,7 +371,10 @@ def fetch_source(url, prefer=None, via=None):
                 info = sub_info(headers)
                 if skipped:
                     info["skipped"] = dict(skipped)
-                return outs, info, ua, []
+                if not merge:
+                    return outs, info, ua, []
+                got.append((outs, info, ua))
+                continue
             if skipped:  # servers were there, none of them runnable
                 msg = f"{host}: {skipped_note(skipped)}"
                 if msg not in errors:
@@ -319,7 +383,30 @@ def fetch_source(url, prefer=None, via=None):
             msg = f"{host}: в ответе нет серверов (ссылка устарела или это не подписка)"
             if msg not in errors:
                 errors.append(msg)
+        if got:
+            break  # this route worked: no need to try the other
+    if got:
+        seen, outs = set(), []
+        for group, _, _ in got:
+            for o in group:
+                k = server_key(o)
+                if k not in seen:
+                    seen.add(k)
+                    outs.append(o)
+        info = dict(got[0][1])
+        skipped = Counter()
+        for _, i, _ in got:
+            skipped.update(i.get("skipped") or {})
+        if skipped:
+            info["skipped"] = dict(skipped)
+        return _unique(outs), info, got[0][2], []
     return [], {}, None, errors
+
+
+def _unique(outs):
+    """Distinct tags across servers that came from different answers (names repeat between them)."""
+    from sources import _unique_tags
+    return _unique_tags([dict(o) for o in outs])
 
 
 def merge_outs(groups):
@@ -367,6 +454,11 @@ PRO_FIELDS = {
     "on_top": (False, "bool", None),
     "alpha": (100, "int", (60, 100)),
     # connection
+    "autoconnect": (False, "bool", None),
+    "use_xray": (True, "bool", None),
+    "merge_subs": (True, "bool", None),
+    "bypass_apps": ("", "apps", None),
+    "vpn_only_apps": ("", "apps", None),
     "mixed_port": (2080, "int", (1024, 65535)),
     "tun_stack": ("mixed", "choice", ("mixed", "system", "gvisor")),
     "strict_route": (True, "bool", None),
@@ -424,6 +516,8 @@ def clean_pro(raw):
             elif kind == "choice":
                 if v not in rule:
                     raise ValueError("такого варианта нет")
+            elif kind == "apps":
+                v = " ".join(clean_apps(v))
             elif kind == "color":
                 v = str(v).strip()
                 if v and not re.fullmatch(r"#?[0-9A-Fa-f]{6}", v):
@@ -441,6 +535,18 @@ def clean_pro(raw):
         except ValueError as e:
             errors[k] = str(e)
     return out, errors
+
+
+def clean_apps(text):
+    """Program names typed by the user ('chrome.exe, steam.exe' or one per line) as a clean list: no paths, no quotes,
+    nothing a rule could choke on."""
+    out = []
+    for tok in re.split(r"[\s,;]+", str(text or "")):
+        tok = tok.strip("\"'")
+        tok = re.split(r"[\\/]", tok)[-1]  # a path pasted by mistake: the file name is what matters
+        if tok and len(tok) <= 64 and re.fullmatch(r"[\w.()+\-]+", tok) and tok.lower() not in (n.lower() for n in out):
+            out.append(tok)
+    return out[:40]
 
 
 DESIGN_SAFE = False  # set when the window could not be built with the saved design: the defaults are used then
@@ -483,13 +589,15 @@ def open_url(url):
 
 
 # ---------- config build ----------
-def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None, mixed_port=None, pro=None):
+def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None, mixed_port=None, pro=None, xray_ports=None):
     """`api` = (port, secret): expose the core's local API so the window can show which server auto mode picked.
     `auto_tags`: the servers «Быстрейший из списка» may choose from (default: all); a hand-picked server is always allowed.
     `pro`: advanced settings (see PRO_FIELDS); missing or wrong values mean the defaults."""
+    outs = [o for o in outs if not engines.is_xray(o) or (xray_ports or {}).get(o["tag"])]  # nothing serves the others
     if not outs:
         raise ValueError("нет серверов")
     pro = clean_pro(pro)[0]
+    outbounds, endpoints = engines.to_singbox(outs, xray_ports)
     tags = [o["tag"] for o in outs]
     proxy_out = {"type": "selector", "tag": "proxy", "outbounds": tags, "default": chosen if chosen in tags else tags[0]}
     if chosen == "AUTO" and len(tags) > 1:
@@ -501,6 +609,13 @@ def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None
         {"protocol": "dns", "action": "hijack-dns"},
         {"ip_is_private": True, "outbound": "direct"},
     ]
+    bypass, only = clean_apps(pro["bypass_apps"]), clean_apps(pro["vpn_only_apps"])
+    if bypass:  # programs the user wants outside the VPN
+        rules.insert(0, {"process_name": bypass, "outbound": "direct"})
+    if xray_ports:  # the companion's own connections must leave around the tunnel, or they would loop back into it
+        rules.insert(0, {"process_name": ["xray.exe", "xray"], "outbound": "direct"})
+    if only:  # only these programs go through the VPN: the rest leaves directly
+        rules.append({"process_name": only, "outbound": "proxy"})
     rule_sets = []
     if ru_direct:
         rules.append({"domain_suffix": RU_SUFFIXES, "outbound": "direct"})
@@ -512,6 +627,10 @@ def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None
     if domains:
         rules.insert(3, {"domain_suffix": domains, "outbound": "direct"})
     dns_rules = []
+    if bypass:
+        dns_rules.append({"process_name": bypass, "server": "local"})
+    if only:
+        dns_rules.append({"process_name": only, "server": "remote"})
     if ru_direct:
         dns_rules.append({"domain_suffix": RU_SUFFIXES, "server": "local"})
         if any(rs["tag"] == "geosite-ru" for rs in rule_sets):
@@ -519,24 +638,26 @@ def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None
     if domains:
         dns_rules.append({"domain_suffix": domains, "server": "local"})
     # proxy server hostnames must resolve via local dns (not through the tunnel)
-    srv = sorted({o["server"] for o in outs if not re.match(r"^[\d.:]+$", o["server"])})
+    srv = sorted({o["server"] for o in outs if not engines.is_xray(o) and not re.match(r"^[\d.:]+$", o["server"])})
     if srv:
         dns_rules.insert(0, {"domain": srv, "server": "local"})
     cfg = {
         "log": {"level": pro["log_level"], "timestamp": True, "output": LOGFILE},
         "dns": {"servers": [{"type": "https", "tag": "remote", "server": pro["dns_remote"], "detour": "proxy"},
                             {"type": "udp", "tag": "local", "server": pro["dns_local"]}],
-                "rules": dns_rules, "final": "remote", "strategy": "ipv4_only"},
+                "rules": dns_rules, "final": "local" if only else "remote", "strategy": "ipv4_only"},
         "inbounds": [
             dict({"type": "tun", "tag": "tun-in", "address": ["172.19.0.1/30"], "auto_route": True,
                   "strict_route": pro["strict_route"], "stack": pro["tun_stack"]},
                  **({} if IS_MAC else {"interface_name": TUN_NAME})),  # macOS names must be utunN: let the core pick
             {"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": mixed_port or pro["mixed_port"]},
         ],
-        "outbounds": outs + [proxy_out, {"type": "direct", "tag": "direct"}],
-        "route": {"rules": rules, "rule_set": rule_sets, "final": "proxy", "auto_detect_interface": True,
+        "outbounds": outbounds + [proxy_out, {"type": "direct", "tag": "direct"}],
+        "route": {"rules": rules, "rule_set": rule_sets, "final": "direct" if only else "proxy", "auto_detect_interface": True,
                   "default_domain_resolver": "local"},
     }
+    if endpoints:
+        cfg["endpoints"] = endpoints
     if not rule_sets:
         del cfg["route"]["rule_set"]
     if api:
@@ -888,10 +1009,17 @@ PRO_LAYOUT = (
         ("on_top", "Окно поверх остальных", "check", None),
         ("alpha", "Непрозрачность окна, %", "entry", "100 — совсем непрозрачное. На некоторых Linux не работает."),
     )),
+    ("Программы", (
+        ("bypass_apps", "Эти программы работают мимо VPN", "entry", "Имена через пробел, например: steam.exe telegram.exe. Нужно, если программа с VPN не работает или тормозит."),
+        ("vpn_only_apps", "Через VPN только эти программы", "entry", "Если заполнено, через VPN идут только они, всё остальное напрямую. Имена так же, через пробел."),
+    )),
     ("Соединение", (
         ("mixed_port", "Порт локального прокси", "entry", "Для программ, которым нужен адрес прокси: 127.0.0.1 и этот порт."),
         ("tun_stack", "Режим сетевого адаптера", "choice", "Если сайты не открываются или тормозят, попробуй system или gvisor."),
         ("strict_route", "Не пускать трафик в обход VPN", "check", None),
+        ("autoconnect", "Подключаться сразу при запуске программы", "check", "Вместе с «Запускать при входе в систему» VPN включается сам, как только вы вошли, а окно прячется в трей."),
+        ("merge_subs", "Спрашивать подписку как разные программы и объединять серверы", "check", "Провайдер отдаёт разным программам разные списки: так в списке будет больше серверов. Если провайдер считает запросы, выключи."),
+        ("use_xray", "Запускать Xray для серверов XHTTP и похожих", "check", "Их ядро не умеет, поэтому рядом работает Xray. Без файла Xray или с выключенной галочкой такие серверы пропускаются."),
         ("auto_reconnect", "Подключаться заново, если соединение оборвалось", "check", None),
     )),
     ("DNS", (
@@ -1043,7 +1171,7 @@ class ProWindow(tk.Toplevel):
             var = tk.BooleanVar(value=bool(value))
             Check(row, label, var, f_b).pack(anchor="w")
         else:
-            wide = key in ("auto_url", "theme", "accent", "ui_font")  # these need the whole width: label above; the rest sit beside their label
+            wide = key in ("auto_url", "theme", "accent", "ui_font", "bypass_apps", "vpn_only_apps")  # these need the whole width: label above; the rest sit beside their label
             line = tk.Frame(row, bg=BG)
             line.pack(fill="x")
             lab = tk.Label(line, text=label, font=f_b, bg=BG, fg=INK, anchor="w", justify="left", wraplength=P(330 if not wide else 500))
@@ -1054,7 +1182,7 @@ class ProWindow(tk.Toplevel):
                 seg = Segmented(line, PRO_FIELDS[key][2], var, f_b, PRO_LABELS.get(key))
                 seg.pack(side="right") if not wide else seg.pack(anchor="w", pady=(P(4), 0))
             else:
-                box, e = field(line, var, 50 if key == "auto_url" else 10 if key in PRO_NARROW else 14, f_b)
+                box, e = field(line, var, 50 if key in ("auto_url", "bypass_apps", "vpn_only_apps") else 10 if key in PRO_NARROW else 14, f_b)
                 box.pack(fill="x", pady=(P(3), 0)) if wide else box.pack(side="right")
                 e.bind("<Return>", lambda ev: self.apply())
                 enable_clipboard(e)
@@ -1258,17 +1386,20 @@ TUN_NAME = "FimaTUN"
 DOUBLE_CLICK_MS = 250  # how long a single click on «Настройки» waits for a possible second one
 
 
-def build_test_config(outs, nic=None, skip=()):
+def build_test_config(outs, nic=None, skip=(), xray_ports=None):
     """One local mixed inbound per server, each pinned to its server. No TUN, no admin needed.
     `nic` = physical adapter name: bind outbound sockets to it so the test bypasses a running VPN.
     `skip` = row numbers the core refused: left out, the others keep their ports."""
-    live = [i for i in range(len(outs)) if i not in skip]
+    live = [i for i in range(len(outs)) if i not in skip and (not engines.is_xray(outs[i]) or (xray_ports or {}).get(outs[i]["tag"]))]
+    outbounds, endpoints = engines.to_singbox([outs[i] for i in live], xray_ports)
     inbounds = [{"type": "mixed", "tag": f"in{i}", "listen": "127.0.0.1", "listen_port": TEST_BASE_PORT + i} for i in live]
     rules = [{"inbound": [f"in{i}"], "outbound": outs[i]["tag"]} for i in live]
     cfg = {"log": {"level": "warn", "output": TESTLOG},
            "dns": {"servers": [{"type": "udp", "tag": "local", "server": "77.88.8.8"}], "strategy": "ipv4_only"},
-           "inbounds": inbounds, "outbounds": [outs[i] for i in live] + [{"type": "direct", "tag": "direct"}],
+           "inbounds": inbounds, "outbounds": outbounds + [{"type": "direct", "tag": "direct"}],
            "route": {"rules": rules, "final": "direct", "default_domain_resolver": "local"}}
+    if endpoints:
+        cfg["endpoints"] = endpoints
     if nic:
         cfg["route"]["default_interface"] = nic
     return cfg
@@ -1418,7 +1549,7 @@ def salvage_outs(outs, work_path=None):
     work_path = work_path or CHECKCFG
     good, bad = [], []
     for o in outs:
-        write_json(work_path, build_config([o], o["tag"], False, []))
+        write_json(work_path, build_config([o], o["tag"], False, [], xray_ports={o["tag"]: 1} if engines.is_xray(o) else None))
         (good if core_check(work_path)[0] else bad).append(o)
     return good, bad
 
@@ -1546,8 +1677,25 @@ def kill_stale_cores(own_pids=()):
     or crashed). A leftover core keeps the TUN adapter and DNS capture alive while the window says 'off', so every
     other program, including our own speed test, silently goes through it."""
     if not IS_WIN:
-        return 0  # Linux/macOS: the root supervisor script stops the core when the window dies
-    ps = ("Get-CimInstance Win32_Process -Filter \"Name='sing-box.exe'\" | "
+        # Linux/macOS: the root supervisor script stops the core when the window dies; a companion Xray (ours, user-level) is
+        # left behind and is stopped here
+        try:
+            out = subprocess.run(["ps", "-A", "-o", "pid=,command="], capture_output=True, text=True, timeout=10).stdout
+        except Exception:  # noqa: BLE001
+            return 0
+        lines = []
+        for line in out.splitlines():
+            pid, _, cmd = line.strip().partition(" ")
+            if "xray" in cmd and "run" in cmd:
+                lines.append(f"{pid}|{cmd.strip()}")
+        pids = parse_stale(chr(10).join(lines), DATA, set(own_pids))
+        for pid in pids:
+            try:
+                os.kill(pid, 15)
+            except OSError:
+                pass
+        return len(pids)
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name='sing-box.exe' OR Name='xray.exe'\" | "
           "ForEach-Object { '{0}|{1}' -f $_.ProcessId, $_.CommandLine }")
     try:
         out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, timeout=20,
@@ -1567,6 +1715,88 @@ def supervisor_script(core, cfg_path, stopfile, gui_pid):
     return (f"{q(core)} run -c {q(cfg_path)} & C=$!; "
             f"while kill -0 {gui_pid} 2>/dev/null && kill -0 $C 2>/dev/null && [ ! -e {q(stopfile)} ]; "
             f"do sleep 1; done; kill $C 2>/dev/null; wait $C; exit $?")
+
+
+def xray_check(cfg_path):
+    """(ok, message) of `xray run -test` for a config file."""
+    try:
+        r = subprocess.run([XRAY, "run", "-test", "-format", "json", "-c", cfg_path], capture_output=True, text=True, creationflags=NOWIN, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"Xray не запускается: {e}"
+    return r.returncode == 0, strip_ansi(r.stdout + r.stderr).strip()
+
+
+def launch_xray(outs, base_port, cfg_path, log_path, nic=None):
+    """Start the companion Xray for the "xray" servers among `outs`. Returns (process or None, {tag: local port},
+    what the user should be told, '' if nothing). A server Xray refuses costs only itself; without a working Xray
+    those servers are simply not offered."""
+    xs = [o for o in outs if engines.is_xray(o)]
+    if not xs:
+        return None, {}, ""
+    if not os.path.isfile(XRAY):
+        return None, {}, "Серверы XHTTP и похожие пропущены: рядом с программой нет файла Xray (скорее всего, его удалил антивирус)."
+    try:
+        open(log_path, "w").close()
+    except OSError:
+        pass
+    note = ""
+    ok, _ = (False, "")
+    ports = {}
+    good = xs
+    for attempt in range(2):
+        nxt, ports = base_port, {}
+        for o in good:
+            nxt = pick_port(nxt)
+            ports[o["tag"]] = nxt
+            nxt += 1
+        write_json(cfg_path, engines.xray_config(good, ports, log_path, nic))
+        ok, msg = xray_check(cfg_path)
+        if ok or attempt == 1:
+            break
+        keep = []  # the whole config was refused: ask about each server on its own
+        for o in good:
+            write_json(cfg_path, engines.xray_config([o], {o["tag"]: base_port}, None, nic))
+            if xray_check(cfg_path)[0]:
+                keep.append(o)
+        if len(keep) < len(good):
+            note = f"Пропущено серверов, которые Xray не принял: {len(good) - len(keep)}."
+        good = keep
+        if not good:
+            return None, {}, note or "Серверы XHTTP и похожие пропущены: Xray их не принял."
+    if not ok:
+        return None, {}, "Серверы XHTTP и похожие пропущены: Xray не принял настройки."
+    try:
+        proc = subprocess.Popen([XRAY, "run", "-format", "json", "-c", cfg_path], cwd=DATA, creationflags=NOWIN,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        return None, {}, f"Серверы XHTTP и похожие пропущены: Xray не запустился ({e})."
+    own(proc)
+    end = time.time() + 8
+    pending = set(ports.values())
+    while pending and time.time() < end:
+        if proc.poll() is not None:
+            return None, {}, "Серверы XHTTP и похожие пропущены: Xray сразу закрылся (его мог остановить антивирус)."
+        for pt in list(pending):
+            try:
+                socket.create_connection(("127.0.0.1", pt), 0.3).close()
+                pending.discard(pt)
+            except OSError:
+                pass
+        if pending:
+            time.sleep(0.2)
+    if pending:
+        stop_proc(proc)
+        return None, {}, "Серверы XHTTP и похожие пропущены: Xray не ответил."
+    return proc, ports, note
+
+
+def stop_proc(proc):
+    if proc and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except Exception:  # noqa: BLE001
+            proc.kill()
 
 
 def start_core(cfg_path):
@@ -1649,6 +1879,8 @@ def resolve_servers(outs):
                 continue
             if isinstance(o.get("tls"), dict) and not o["tls"].get("server_name"):
                 o["tls"] = dict(o["tls"], server_name=host)
+            if engines.is_xray(o):
+                o["xray"] = engines.xray_with_address(o, ip)
             o["server"] = ip
         res.append(o)
     return res
@@ -1797,6 +2029,9 @@ class App(tk.Tk):
         self.proc = None
         self.pro_win = None  # the advanced settings window, while it is open
         self.mixed_active = None  # port of the local proxy of the running connection
+        self._login_busy = False
+        self.xray_proc = None  # the companion Xray of the running connection, if any servers need it
+        self.test_xray = None  # ... and the one of a running test
         self.test_proc = None
         self.test_skip = set()  # rows of the server list the core refused in the last test
         self.restarts = []  # when the connection was brought back after the core stopped on its own
@@ -1840,6 +2075,8 @@ class App(tk.Tk):
                     "show_flags": True, "show_ping": True, "show_speed": True,
                     "skip_home": True,  # auto mode passes over servers that exit in the user's own blocking country
                     "pro": {},  # advanced settings the user changed (window opens with a double click on «Настройки»)
+                    "autostart": False,  # started at login by the system (see autostart_set)
+                    "pins": [],  # servers pinned to the top of the list (their address:port)
                     "tray_on_close": True, "tray_hint_shown": False}
         try:
             self.cfg = merge_cfg(self.cfg, json.load(open(SETTINGS, encoding="utf-8-sig")))
@@ -1913,7 +2150,7 @@ class App(tk.Tk):
         self.tree.column("#0", anchor="w", stretch=True, width=P(170))  # flag + server name
         meter = tkfont.Font(self, font=self.f_b)
         self.col_w = {"ping": meter.measure("0000 мс") + P(20), "speed": meter.measure("000 Мбит/с") + P(20),
-                      "proto": max(meter.measure(n) for n in PROTO.values()) + P(20)}
+                      "proto": max(meter.measure(n) for n in list(PROTO.values()) + ["XHTTP", "MKCP", "TROJAN+"]) + P(20)}
         self.tree.column("ping", anchor="e", width=self.col_w["ping"], stretch=False)
         self.tree.column("speed", anchor="e", width=self.col_w["speed"], stretch=False)
         self.tree.column("proto", anchor="e", width=self.col_w["proto"], stretch=False)
@@ -1925,6 +2162,9 @@ class App(tk.Tk):
         self.tree.tag_configure("home", foreground=MUTE)  # servers «Быстрейший из списка» passes over
         self.tree.bind("<Configure>", self.fit_tree_columns, add="+")
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
+        self.tree.bind("<Button-2>" if IS_MAC else "<Button-3>", self.row_menu)
+        if IS_MAC:
+            self.tree.bind("<Control-Button-1>", self.row_menu)
         self.empty = tk.Label(frame, text="Серверов пока нет.\n\nВставь ссылку подписки или ключ в поле «Подписки» ниже "
                                           "и нажми «Обновить».", font=self.f_s, bg=PAPER, fg=MUTE, justify="center", wraplength=P(300))
         self.tree.bind("<Double-1>", lambda e: self.toggle() if self.state == "off" else None)
@@ -1957,6 +2197,7 @@ class App(tk.Tk):
                            selectforeground=ONACCENT, padx=P(6), pady=P(5))
         self.src.pack(fill="x")
         self.src.insert("1.0", self.cfg["sources"])
+        self.usage = tk.Label(root, text="", font=self.f_s, bg=BG, fg=MUTE, anchor="w", justify="left", wraplength=P(430))  # shown above the box when a provider reports traffic or an expiry date
         self.src_hint = tk.Label(self.src, text="Ссылка подписки (https://…) или ключ (vless://, vmess://, trojan://, ss://, hysteria2://…). "
                                                 "Можно вставить несколько, по одной в строке.", font=(self.fam, FZ(9)), bg=PAPER, fg=MUTE,
                                  justify="left", anchor="w", wraplength=P(380), cursor="xterm")
@@ -1990,6 +2231,10 @@ class App(tk.Tk):
             Check(self.set_box, "Закрытие окна сворачивает в трей", self.v_tray, self.f_b).pack(anchor="w", pady=(0, P(2)))
             self.v_tray.trace_add("write", lambda *a: (self.cfg.update(tray_on_close=self.v_tray.get()),
                                                        self.save(sources=False)))
+        self.v_login = tk.BooleanVar(value=bool(self.cfg.get("autostart", False)))
+        if autostart_command() is not None:  # only the packaged program has something to start
+            Check(self.set_box, "Запускать при входе в систему", self.v_login, self.f_b).pack(anchor="w", pady=(0, P(2)))
+            self.v_login.trace_add("write", self.on_login_toggle)
         urow = tk.Frame(self.set_box, bg=BG)
         urow.pack(fill="x", pady=(P(8), 0))
         self.upd_var = tk.BooleanVar(value=bool(self.cfg.get("auto_update")))
@@ -2022,6 +2267,8 @@ class App(tk.Tk):
             finally:
                 self.clean_done.set()
         threading.Thread(target=clean, daemon=True).start()
+        if self.cfg.get("autostart") and autostart_command() is not None:  # keep the login entry pointing at this very file
+            threading.Thread(target=autostart_set, args=(True,), daemon=True).start()
         threading.Thread(target=self.home_worker, daemon=True).start()
         self._pump_id = self.after(50, self.pump)
         self.start_instance_server()
@@ -2516,11 +2763,12 @@ class App(tk.Tk):
         prefer = {u: self.subs.get(u, {}).get("ua") for u in targets}
         # a provider that blocks the direct way is often reachable through the VPN that is already up
         via = f"http://127.0.0.1:{self.mixed_active}" if self.state == "on" and self.mixed_active else None
+        merge = bool(self.pro()["merge_subs"])
         self.loading = True
         self.sub_note.config(text="обновляю…")
 
         def work():
-            got = {u: fetch_source(u, prefer[u], via) for u in targets}
+            got = {u: fetch_source(u, prefer[u], via, merge) for u in targets}
             inline_outs, inline_skipped = parse_inline(inline)
             self._ui(lambda: self.loaded(got, inline_outs, urls, manual, silent, inline_skipped))
         threading.Thread(target=work, daemon=True).start()
@@ -2583,10 +2831,10 @@ class App(tk.Tk):
                              values=("", "", "AUTO"))
         for i, o in enumerate(outs):
             ping, speed = self.results.get(o["tag"], (None, None))
-            self.tree.insert("", "end", iid=str(i), text=flags.strip_flag(o["tag"]),
+            self.tree.insert("", "end", iid=str(i), text=self.row_text(o),
                              image=self.flagimgs.get(self.flag_code(o)) if self.v_flags.get() else "",
-                             values=(fmt_ping(ping), fmt_speed(speed), PROTO.get(o["type"], o["type"].upper())))
-        if self.results:
+                             values=(fmt_ping(ping), fmt_speed(speed), engines.proto_label(o) or PROTO.get(o["type"], o["type"].upper())))
+        if self.results or self.cfg["pins"]:
             self.sort_rows()
         pick = next((str(i) for i, o in enumerate(outs) if o["tag"] == keep), None)
         pick = pick or ("auto" if len(outs) > 1 else "0")
@@ -2616,8 +2864,26 @@ class App(tk.Tk):
         except tk.TclError:
             pass
 
+    def show_usage(self):
+        """What each provider says about traffic left and the end date, above the subscription box (red when little is left)."""
+        lines, warn = [], False
+        for u, sub in self.subs.items():
+            line, bad = usage_line(sub.get("info"), urlsplit(u).hostname)
+            if line:
+                lines.append(line)
+                warn = warn or bad
+        try:
+            if lines:
+                self.usage.config(text="\n".join(lines[:4]), fg=RED if warn else MUTE)
+                self.usage.pack(fill="x", pady=(0, P(6)), before=self.sbx)
+            else:
+                self.usage.pack_forget()
+        except tk.TclError:
+            pass
+
     def note_subs(self):
         """'обновлено в 14:05' = when the least fresh subscription was last fetched successfully."""
+        self.show_usage()
         times = [s.get("time", 0) for s in self.subs.values()]
         if not times:
             return self.sub_note.config(text="")
@@ -2812,15 +3078,20 @@ class App(tk.Tk):
             if not nic and self.state != "off":
                 raise RuntimeError("не нашёл подключение к интернету")
             outs = resolve_servers(outs)
-            self.test_skip = set()
-            write_json(TESTCFG, build_test_config(outs, nic))
+            xports = {}
+            if engines.has_xray(outs) and self.pro()["use_xray"]:
+                self.test_xray, xports, xnote = launch_xray(outs, XRAY_TEST_PORT, XRAYTESTCFG, XRAYTESTLOG, nic)
+                if xnote:
+                    self._ui(lambda: self.say(xnote, err=True))
+            self.test_skip = {i for i, o in enumerate(outs) if engines.is_xray(o) and o["tag"] not in xports}  # nothing serves them
+            write_json(TESTCFG, build_test_config(outs, nic, self.test_skip, xports))
             open(TESTLOG, "w").close()
             ok, msg = core_check(TESTCFG)
             if not ok:  # one server the core does not accept must not spoil the test of all the others
-                good, bad = salvage_outs(outs, CHECKCFG)
-                self.test_skip = {i for i, o in enumerate(outs) if any(o is b for b in bad)}
+                good, bad = salvage_outs([o for i, o in enumerate(outs) if i not in self.test_skip], CHECKCFG)
+                self.test_skip |= {i for i, o in enumerate(outs) if any(o is b for b in bad)}
                 if good and self.test_skip:
-                    write_json(TESTCFG, build_test_config(outs, nic, self.test_skip))
+                    write_json(TESTCFG, build_test_config(outs, nic, self.test_skip, xports))
                     ok, msg = core_check(TESTCFG)
             if not ok:
                 raise RuntimeError("не получилось подготовить проверку серверов")
@@ -2852,6 +3123,8 @@ class App(tk.Tk):
                     p.wait(5)
                 except Exception:
                     p.kill()
+            stop_proc(self.test_xray)
+            self.test_xray = None
             self._ui(lambda: self.test_done(err))
 
     def test_done(self, err):
@@ -2912,6 +3185,57 @@ class App(tk.Tk):
             hint += " Серые серверы (выход в России) «Быстрейший из списка» не берёт: через них блокировки не обойти."
         self.say(f"{head}{src}{note} {hint}".strip())
 
+    def is_pinned(self, i):
+        return okey(self.outs[i]) in self.cfg["pins"]
+
+    def row_text(self, o):
+        return ("★ " if okey(o) in self.cfg["pins"] else "") + flags.strip_flag(o["tag"])
+
+    def toggle_pin(self, i):
+        """Pin a server to the top of the list, or take it off again; kept by address, so it survives a refresh."""
+        key = okey(self.outs[i])
+        pins = [k for k in self.cfg["pins"] if k != key]
+        if key not in self.cfg["pins"]:
+            pins.insert(0, key)
+        self.cfg["pins"] = pins[:200]
+        if self.tree.exists(str(i)):
+            self.tree.item(str(i), text=self.row_text(self.outs[i]))
+        self.sort_rows()
+        self.save(sources=False)
+
+    def row_menu(self, e):
+        """Right click on a server: pin it, copy its name."""
+        iid = self.tree.identify_row(e.y)
+        if not iid or iid == "auto" or not iid.isdigit() or int(iid) >= len(self.outs):
+            return
+        i = int(iid)
+        o = self.outs[i]
+        m = tk.Menu(self, tearoff=0, bg=PAPER, fg=INK, activebackground=INK, activeforeground=PAPER, bd=0, font=self.f_s)
+        m.add_command(label="Открепить" if self.is_pinned(i) else "Закрепить сверху", command=lambda: self.toggle_pin(i))
+        m.add_command(label="Скопировать название", command=lambda: (self.clipboard_clear(), self.clipboard_append(flags.strip_flag(o["tag"]))))
+        m.tk_popup(e.x_root, e.y_root)
+
+    def on_login_toggle(self, *a):
+        want = self.v_login.get()
+        if self._login_busy:
+            return
+        if autostart_set(want):
+            self.cfg["autostart"] = want
+            self.save(sources=False)
+            self.say("Программа будет запускаться при входе в систему." if want else "Автозапуск выключен.")
+        else:
+            self._login_busy = True  # put the tick back without running this handler again
+            self.v_login.set(not want)
+            self._login_busy = False
+            self.say("Не получилось изменить автозапуск. Нужны права администратора и собранная программа.", err=True)
+
+    def autostart_run(self):
+        """Started at login (--autostart): out of the way in the tray, and connected if the settings say so."""
+        if self.tray_ok:
+            self.hide_to_tray()
+        if self.pro()["autoconnect"] and self.outs and self.state == "off":
+            self.toggle()
+
     def sort_rows(self):
         """Measured speed (desc), then ping (asc); only what is switched on counts. Servers that did not answer and
         untested ones go last; "auto" stays on top."""
@@ -2919,7 +3243,7 @@ class App(tk.Tk):
             p, sp = self.results.get(self.outs[i]["tag"], (None, None))
             fast = self.v_speed.get() and sp is not None and sp >= 0
             usep = self.v_ping.get() and p is not None and p >= 0
-            return (not self.is_alive(i), not fast, -(sp if fast else 0), p if usep else 0)
+            return (not self.is_pinned(i), not self.is_alive(i), not fast, -(sp if fast else 0), p if usep else 0)
         start = 1 if self.tree.exists("auto") else 0
         for pos, i in enumerate(sorted(range(len(self.outs)), key=key)):
             self.tree.move(str(i), "", pos + start)
@@ -2971,6 +3295,7 @@ class App(tk.Tk):
         try:
             self.proc = start_core(RUNCFG)
         except OSError as e:  # blocked by an antivirus, no rights, file locked
+            self.stop_xray()
             self.say("VPN не запустился. Проверь антивирус и права.", err=True)
             return show_error(self, "VPN не смог запуститься.\n\nОбычно виноват антивирус или нехватка прав. Что сделать: добавь "
                                     "программу в исключения антивируса, закрой её и открой снова от имени администратора.\n\n"
@@ -2989,9 +3314,28 @@ class App(tk.Tk):
         pro = self.pro()
         mixed = pick_port(pro["mixed_port"])
         notes = [] if mixed == pro["mixed_port"] else [f"Порт {pro['mixed_port']} занят, локальный прокси на порту {mixed}."]
+        self.stop_xray()
+        xports = {}
+        if engines.has_xray(outs):
+            if pro["use_xray"]:
+                xs = resolve_servers([o for o in outs if engines.is_xray(o)])  # Xray needs no DNS of its own, whatever the tunnel does
+                by_tag = {o["tag"]: o for o in xs}
+                outs = [by_tag.get(o["tag"], o) for o in outs]
+                self.xray_proc, xports, problem = launch_xray(outs, XRAY_PORT, XRAYCFG, XRAYLOG)
+                if problem:
+                    notes.append(problem)
+            else:
+                notes.append("Серверы XHTTP и похожие пропущены: Xray выключен в расширенных настройках.")
+            outs = [o for o in outs if not engines.is_xray(o) or o["tag"] in xports]
+            names = {o["tag"] for o in outs}
+            pool = [t for t in pool if t in names] or list(names)
+            if chosen != "AUTO" and chosen not in names:
+                chosen = "AUTO"
+            if not outs:
+                return False, "нет серверов, которые можно запустить", " ".join(notes)
 
         def write():
-            write_json(RUNCFG, build_config(outs, chosen, self.ru.get(), extra, self.api, pool, mixed, pro))
+            write_json(RUNCFG, build_config(outs, chosen, self.ru.get(), extra, self.api, pool, mixed, pro, xports))
         write()
         ok, msg = core_check(RUNCFG)
         for step in ("rules", "servers", "pro"):  # what may be to blame, most likely first
@@ -3023,7 +3367,13 @@ class App(tk.Tk):
             write()
             ok, msg = core_check(RUNCFG)
         self.mixed_active = mixed
+        if not ok:
+            self.stop_xray()
         return ok, msg, " ".join(notes)
+
+    def stop_xray(self):
+        stop_proc(getattr(self, "xray_proc", None))
+        self.xray_proc = None
 
     def pro(self):
         """The advanced settings in force (defaults where the user changed nothing or typed something unusable)."""
@@ -3125,6 +3475,7 @@ class App(tk.Tk):
 
     def stop(self):
         stop_core(self.proc)
+        self.stop_xray()
         self.proc = None
         self.state = "off"
         self.active = ""
@@ -3200,6 +3551,24 @@ class App(tk.Tk):
             self.update_check()
         if self.proc and self.proc.poll() is not None and self.state != "off":
             self.fail()
+        elif self.xray_proc is not None and self.xray_proc.poll() is not None and self.state in ("on", "connecting"):
+            self.revive_xray()
+
+    def revive_xray(self):
+        """The companion Xray stopped while the connection is up (a crash, an antivirus): start it again on the same ports,
+        the core's SOCKS servers pick up where they were. At most 3 times in 10 minutes."""
+        now = time.time()
+        self.xray_restarts = [t for t in getattr(self, "xray_restarts", []) if now - t < 600]
+        if len(self.xray_restarts) >= 3:
+            self.xray_proc = None
+            return self.say("Xray остановился несколько раз подряд: серверы XHTTP и похожие сейчас не работают. Подключись заново.", err=True)
+        self.xray_restarts.append(now)
+        try:
+            self.xray_proc = subprocess.Popen([XRAY, "run", "-format", "json", "-c", XRAYCFG], cwd=DATA, creationflags=NOWIN,
+                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            own(self.xray_proc)
+        except OSError:
+            self.xray_proc = None
 
     def tail(self):
         try:
@@ -3255,7 +3624,7 @@ class App(tk.Tk):
         self.remember_window()
         self.save()
         self.test_stop.set()
-        for p in (self.test_proc, HOME_PROC):
+        for p in (self.test_proc, self.test_xray, HOME_PROC):
             if p and p.poll() is None:
                 p.kill()
         self.stop()
@@ -3345,6 +3714,75 @@ def signal_running_instance():
             c.sendall(b"show\n")
             return c.recv(8).startswith(b"ok")
     except Exception:  # noqa: BLE001
+        return False
+
+
+AUTOSTART_NAME = "FimaVPN"
+
+
+def autostart_command():
+    """The program as the system should start it at login, or None when this is not the packaged program (a source run has
+    nothing stable to start)."""
+    if not getattr(sys, "frozen", False):
+        return None
+    return [sys.executable, "--autostart"]
+
+
+def _autostart_files():
+    home = os.path.expanduser("~")
+    return (os.path.join(home, "Library", "LaunchAgents", "io.fimavpn.plist") if IS_MAC
+            else os.path.join(home, ".config", "autostart", "fimavpn.desktop"))
+
+
+def autostart_set(on, cmd=None):
+    """Start the program at login (or stop doing so). Windows: a scheduled task at logon with the highest rights, because
+    the program needs the administrator's rights and a plain startup entry would ask for them at every login. Linux: an
+    autostart entry. macOS: a LaunchAgent. Returns True if it worked."""
+    cmd = cmd or autostart_command()
+    try:
+        if IS_WIN:
+            if on:
+                if not cmd:
+                    return False
+                tr = " ".join('"' + c + '"' if " " in c else c for c in cmd)
+                r = subprocess.run(["schtasks", "/create", "/tn", AUTOSTART_NAME, "/tr", tr, "/sc", "onlogon", "/rl", "highest", "/f"],
+                                   capture_output=True, creationflags=NOWIN, timeout=30)
+            else:
+                r = subprocess.run(["schtasks", "/delete", "/tn", AUTOSTART_NAME, "/f"], capture_output=True, creationflags=NOWIN, timeout=30)
+                return r.returncode == 0 or not autostart_enabled()  # already gone is as good
+            return r.returncode == 0
+        path = _autostart_files()
+        if not on:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            return True
+        if not cmd:
+            return False
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if IS_MAC:
+            args = "".join(f"<string>{c}</string>" for c in cmd)
+            body = ('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+                    '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>'
+                    f'<key>Label</key><string>io.fimavpn</string><key>ProgramArguments</key><array>{args}</array>'
+                    '<key>RunAtLoad</key><true/></dict></plist>\n')
+        else:
+            body = ("[Desktop Entry]\nType=Application\nName=VPN\nExec=" + " ".join(shlex.quote(c) for c in cmd) +
+                    "\nTerminal=false\nX-GNOME-Autostart-enabled=true\n")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def autostart_enabled():
+    try:
+        if IS_WIN:
+            return subprocess.run(["schtasks", "/query", "/tn", AUTOSTART_NAME], capture_output=True, creationflags=NOWIN, timeout=20).returncode == 0
+        return os.path.isfile(_autostart_files())
+    except (OSError, subprocess.SubprocessError):
         return False
 
 
@@ -3470,6 +3908,8 @@ if __name__ == "__main__":
         try:  # most likely a design setting the system cannot do: the default look, nothing else touched
             DESIGN_SAFE = True
             app = App()
+            if "--autostart" in sys.argv:
+                app.after(400, app.autostart_run)
             app.mainloop()
             sys.exit(0)
         except Exception:  # noqa: BLE001
@@ -3480,4 +3920,6 @@ if __name__ == "__main__":
             except OSError:
                 pass
         app = App()
+    if "--autostart" in sys.argv:
+        app.after(400, app.autostart_run)
     app.mainloop()

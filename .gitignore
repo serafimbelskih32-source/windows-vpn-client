@@ -6,6 +6,9 @@ test_links.txt
 core/sing-box.exe
 core/libcronet.dll
 core/LICENSE
+core/xray
+core/xray.exe
+core/XRAY-LICENSE
 
 # build output and local tooling
 build/
