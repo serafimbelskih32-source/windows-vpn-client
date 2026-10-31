@@ -63,6 +63,7 @@ jobs:
             tar -xzf sb.tgz -C sb
             cp "sb/$N/sing-box" core/sing-box
             cp "sb/$N/LICENSE" core/LICENSE 2>/dev/null || true
+            cp sb/$N/libcronet* core/ 2>/dev/null || true  # NaiveProxy needs it next to the core
             chmod +x core/sing-box
           fi
           ls -la core

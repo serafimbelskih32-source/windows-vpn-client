@@ -88,6 +88,13 @@ check("... a name that was only implied (the address) is made explicit before it
 
 # ---------- the real core and the real Xray look at the configs ----------
 if HAVE_CORE:
+    # NaiveProxy needs a library (libcronet) next to the core; where the build has none, the config is checked without it
+    vpn.write_json(vpn.CHECKCFG, vpn.build_config([by["naive"]], "AUTO", True, []))
+    ok_naive, msg_naive = vpn.core_check(vpn.CHECKCFG)
+    if not ok_naive:
+        print("     (the core has no NaiveProxy here:", msg_naive.strip()[-60:], ")")
+        outs = [o for o in outs if o["type"] != "naive"]
+        by = {o["tag"]: o for o in outs}
     cfg = vpn.build_config(outs, "AUTO", True, [], None, None, 2080, None, ports)
     vpn.write_json(vpn.RUNCFG, cfg)
     ok, msg = vpn.core_check(vpn.RUNCFG)
