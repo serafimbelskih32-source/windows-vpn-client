@@ -48,6 +48,11 @@ def data_dir():
 
 
 DATA = data_dir()
+try:
+    os.makedirs(DATA, exist_ok=True)
+except OSError:  # read-only or blocked profile folder: work from a temp folder instead of not starting at all
+    import tempfile
+    DATA = os.path.join(tempfile.gettempdir(), "FimaVPN")
 STOPFILE = os.path.join(DATA, "stop")  # Linux/macOS: the root supervisor stops the core when this file appears
 INSTANCE_FILE = os.path.join(DATA, "instance.port")  # loopback port of the running copy, so a 2nd launch can reach it
 UPDATE_DIR = updater.update_dir(DATA)  # a downloaded, verified update waits here for the next start (one folder per program file)
@@ -56,6 +61,7 @@ RUNCFG = os.path.join(DATA, "run.json")
 LOGFILE = os.path.join(DATA, "sing-box.log")
 TESTCFG = os.path.join(DATA, "test.json")
 TESTLOG = os.path.join(DATA, "test.log")
+CHECKCFG = os.path.join(DATA, "check.json")  # one server at a time, when the whole config is refused
 HOMECFG = os.path.join(DATA, "home.json")  # a throw-away core that only asks which country this computer is really in
 HOMELOG = os.path.join(DATA, "home.log")
 SUBCACHE = os.path.join(DATA, "subs.json")
@@ -153,6 +159,12 @@ def log_crash(exc_type, exc, tb):
     """--windowed builds have no console: keep unexpected errors in %APPDATA%\\FimaVPN\\crash.log."""
     try:
         import traceback
+        path = os.path.join(DATA, "crash.log")
+        if os.path.getsize(path) > 1024 * 1024:  # a repeating error must not fill the disk
+            os.replace(path, path + ".old")
+    except OSError:
+        pass
+    try:
         with open(os.path.join(DATA, "crash.log"), "a", encoding="utf-8") as f:
             f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + "".join(traceback.format_exception(exc_type, exc, tb)) + "\n")
     except Exception:
@@ -289,7 +301,7 @@ def parse_link(link: str):
             return o
         u = urlparse(link)
         q = parse_qs(u.query)
-        host, port = u.hostname, u.port or 443
+        host, port = u.hostname, (u.port if u.port is not None else 443)  # an explicit :0 is wrong, not "443"
         if scheme == "vless":
             o = {"type": "vless", "tag": name, "server": host, "server_port": port, "uuid": unquote(u.username or ""),
                  "packet_encoding": "xudp"}
@@ -329,17 +341,64 @@ def parse_link(link: str):
     return None
 
 
+_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_NEEDS = {"vless": ("uuid",), "vmess": ("uuid",), "tuic": ("uuid",), "trojan": ("password",),
+          "shadowsocks": ("method", "password"), "hysteria2": ("password",)}
+_NOT_SERVERS = ("direct", "block", "dns", "selector", "urltest")
+
+
+def valid_outbound(o):
+    """Can this entry be a server at all? One broken line of a subscription (no host, port 0, a UUID that is not
+    one) used to make the whole config fail its check, so nobody could connect. Anything dubious is dropped here;
+    what only the core can judge is dealt with by salvage_outs."""
+    try:
+        if not isinstance(o, dict) or not isinstance(o.get("type"), str) or o["type"] in _NOT_SERVERS or not o["type"]:
+            return False
+        srv, port = o.get("server"), o.get("server_port")
+        if not isinstance(srv, str) or not srv.strip() or len(srv) > 253 or re.search(r"[\s/@#?\\]", srv):
+            return False
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            return False
+        for k in _NEEDS.get(o["type"], ()):
+            if not isinstance(o.get(k), str) or not o[k].strip():
+                return False
+        if "uuid" in _NEEDS.get(o["type"], ()) and not _UUID.match(o["uuid"]):
+            return False
+        for k in ("tls", "transport"):
+            if k in o and not isinstance(o[k], dict):
+                return False
+        tls = o.get("tls") or {}
+        if "alpn" in tls and (not isinstance(tls["alpn"], list) or not all(isinstance(a, str) and a for a in tls["alpn"])):
+            return False
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def clean_outbound(o):
+    """What a core must never take from a subscription: links to other outbounds (a server that is 'behind' a tag that
+    is not in our list makes the config invalid) and anything that is not plain data."""
+    o = dict(o)
+    for k in ("detour", "outbounds", "default", "interrupt_exist_connections", "domain_resolver"):
+        o.pop(k, None)
+    if not isinstance(o.get("tag"), str):
+        o["tag"] = ""
+    return o
+
+
 def parse_text(text: str):
-    """Return list of sing-box outbounds from a blob: links, base64 of links, or a sing-box json."""
+    """Return list of sing-box outbounds from a blob: links, base64 of links, or a sing-box json.
+    Only entries that pass valid_outbound come back; a bad line costs that one server, never the list."""
     text = text.strip()
     if text.startswith("{"):
         try:
             j = json.loads(text)
-            skip = {"direct", "block", "dns", "selector", "urltest"}
-            return [o for o in j.get("outbounds", []) if o.get("type") not in skip]
+            raw = [clean_outbound(o) for o in j.get("outbounds", []) if isinstance(o, dict)]
+            outs = [o for o in raw if valid_outbound(o)]
         except Exception:
             return []
-    if "://" not in text.split("\n")[0]:
+        return _unique_tags(outs)
+    if "://" not in text:  # base64 never contains "://"; a plain list may start with a comment or a broken line
         try:
             text = b64d("".join(text.split()))
         except Exception:
@@ -347,11 +406,17 @@ def parse_text(text: str):
     outs = []
     for line in re.split(r"[\r\n]+", text):
         o = parse_link(line)
-        if o:
+        if o and valid_outbound(o):
             outs.append(o)
+    return _unique_tags(outs)
+
+
+def _unique_tags(outs):
+    """Every server gets a non-empty tag of its own that does not collide with the config's reserved ones."""
     seen = {}
-    for i, o in enumerate(outs):
+    for o in outs:
         t = o.get("tag") or f"{o['type']}-{o.get('server', '?')}:{o.get('server_port', '')}"
+        t = t.strip()[:120] or f"{o['type']}-{o.get('server', '?')}"
         if t in ("proxy", "direct", "AUTO"):
             t += " (node)"
         if t in seen:
@@ -364,6 +429,7 @@ def parse_text(text: str):
 
 
 UAS = ("v2rayN/7.0", "sing-box/1.13")
+MAX_SUB_BYTES = 8 * 1024 * 1024  # a real subscription is tens of kilobytes
 REFRESH_DEFAULT_H = 12  # when the provider does not send profile-update-interval
 
 
@@ -371,7 +437,10 @@ def fetch(url: str, ua: str):
     """Returns (body, headers with lower-case names)."""
     req = urllib.request.Request(url, headers={"User-Agent": ua})
     with urllib.request.urlopen(req, timeout=20) as r:
-        return r.read().decode("utf-8", "replace"), {k.lower(): v for k, v in r.headers.items()}
+        body = r.read(MAX_SUB_BYTES + 1)
+        if len(body) > MAX_SUB_BYTES:
+            raise ValueError("ответ слишком большой для подписки")
+        return body.decode("utf-8", "replace"), {k.lower(): v for k, v in r.headers.items()}
 
 
 def split_sources(src: str):
@@ -418,12 +487,12 @@ def fetch_source(url, prefer=None):
         try:
             body, headers = fetch(url, ua)
         except Exception as e:
-            errors.append(f"{url[:50]}: {e}")
+            errors.append(f"{urlsplit(url).hostname or 'подписка'}: {e}")  # the path holds the user's key: not shown
             continue
         outs = parse_text(body)
         if outs:
             return outs, sub_info(headers), ua, []
-    return [], {}, None, errors or [f"{url[:50]}: в ответе нет серверов"]
+    return [], {}, None, errors or [f"{urlsplit(url).hostname or 'подписка'}: в ответе нет серверов"]
 
 
 def merge_outs(groups):
@@ -431,7 +500,10 @@ def merge_outs(groups):
     seen, res = set(), []
     for group in groups:
         for o in group:
+            if not valid_outbound(o):
+                continue
             o = dict(o)
+            o["tag"] = o.get("tag") or f"{o['type']}-{o['server']}:{o['server_port']}"
             while o["tag"] in seen:
                 o["tag"] += "*"
             seen.add(o["tag"])
@@ -440,9 +512,11 @@ def merge_outs(groups):
 
 
 # ---------- config build ----------
-def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None):
+def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None, mixed_port=None):
     """`api` = (port, secret): expose the core's local API so the window can show which server auto mode picked.
     `auto_tags`: the servers «Быстрейший из списка» may choose from (default: all); a hand-picked server is always allowed."""
+    if not outs:
+        raise ValueError("нет серверов")
     tags = [o["tag"] for o in outs]
     proxy_out = {"type": "selector", "tag": "proxy", "outbounds": tags, "default": chosen if chosen in tags else tags[0]}
     if chosen == "AUTO" and len(tags) > 1:
@@ -484,7 +558,7 @@ def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None
             dict({"type": "tun", "tag": "tun-in", "address": ["172.19.0.1/30"], "auto_route": True,
                   "strict_route": True, "stack": "mixed"},
                  **({} if IS_MAC else {"interface_name": TUN_NAME})),  # macOS names must be utunN: let the core pick
-            {"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": MIXED_PORT},
+            {"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": mixed_port or MIXED_PORT},
         ],
         "outbounds": outs + [proxy_out, {"type": "direct", "tag": "direct"}],
         "route": {"rules": rules, "rule_set": rule_sets, "final": "proxy", "auto_detect_interface": True,
@@ -837,19 +911,129 @@ TOP_FOR_SPEED = 8
 TUN_NAME = "FimaTUN"
 
 
-def build_test_config(outs, nic=None):
+def build_test_config(outs, nic=None, skip=()):
     """One local mixed inbound per server, each pinned to its server. No TUN, no admin needed.
-    `nic` = physical adapter name: bind outbound sockets to it so the test bypasses a running VPN."""
-    inbounds = [{"type": "mixed", "tag": f"in{i}", "listen": "127.0.0.1", "listen_port": TEST_BASE_PORT + i}
-                for i in range(len(outs))]
-    rules = [{"inbound": [f"in{i}"], "outbound": o["tag"]} for i, o in enumerate(outs)]
+    `nic` = physical adapter name: bind outbound sockets to it so the test bypasses a running VPN.
+    `skip` = row numbers the core refused: left out, the others keep their ports."""
+    live = [i for i in range(len(outs)) if i not in skip]
+    inbounds = [{"type": "mixed", "tag": f"in{i}", "listen": "127.0.0.1", "listen_port": TEST_BASE_PORT + i} for i in live]
+    rules = [{"inbound": [f"in{i}"], "outbound": outs[i]["tag"]} for i in live]
     cfg = {"log": {"level": "warn", "output": TESTLOG},
            "dns": {"servers": [{"type": "udp", "tag": "local", "server": "77.88.8.8"}], "strategy": "ipv4_only"},
-           "inbounds": inbounds, "outbounds": outs + [{"type": "direct", "tag": "direct"}],
+           "inbounds": inbounds, "outbounds": [outs[i] for i in live] + [{"type": "direct", "tag": "direct"}],
            "route": {"rules": rules, "final": "direct", "default_domain_resolver": "local"}}
     if nic:
         cfg["route"]["default_interface"] = nic
     return cfg
+
+
+def core_check(cfg_path):
+    """(ok, message) of `sing-box check` for a config file."""
+    try:
+        chk = subprocess.run([CORE, "check", "-c", cfg_path], capture_output=True, text=True, creationflags=NOWIN, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:  # core missing (antivirus), blocked, hung
+        return False, f"ядро не запускается: {e}"
+    return chk.returncode == 0, (chk.stderr or chk.stdout).strip()
+
+
+def drop_downloaded_rules():
+    """Delete the downloaded RU lists: rule_path() then falls back to the copy bundled with the program."""
+    try:
+        for name in os.listdir(RULES_DIR):
+            if name.endswith(".srs"):
+                os.remove(os.path.join(RULES_DIR, name))
+    except OSError:
+        pass
+
+
+def pick_port(preferred):
+    """`preferred` if it is free on loopback, else any free one (another program may sit on 2080)."""
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", preferred))
+        return preferred
+    except OSError:
+        return free_port()
+    finally:
+        s.close()
+
+
+def merge_cfg(defaults, loaded):
+    """Saved settings laid over the defaults; a value of the wrong type (a hand-edited or damaged file) is ignored
+    instead of crashing the window at start."""
+    cfg = dict(defaults)
+    if not isinstance(loaded, dict):
+        return cfg
+    for k, v in loaded.items():
+        d = defaults.get(k)
+        if k not in defaults:
+            cfg[k] = v
+        elif d is None:
+            ok = v is None or isinstance(v, bool)
+        elif isinstance(d, bool):
+            ok = isinstance(v, bool)
+        elif isinstance(d, (int, float)):
+            ok = isinstance(v, (int, float)) and not isinstance(v, bool)
+        else:
+            ok = isinstance(v, type(d))
+        if k in defaults and ok:
+            cfg[k] = v
+    return cfg
+
+
+def clean_subs(raw):
+    """The cached subscriptions: only well-formed entries with usable servers survive."""
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for url, e in raw.items():
+        if isinstance(url, str) and isinstance(e, dict) and isinstance(e.get("outs"), list):
+            e = dict(e)
+            e["outs"] = [o for o in e["outs"] if valid_outbound(o)]
+            if not isinstance(e.get("info"), dict):
+                e["info"] = {}
+            if isinstance(e.get("time"), bool) or not isinstance(e.get("time"), (int, float)):
+                e["time"] = 0
+            out[url] = e
+    return out
+
+
+def trim_logs():
+    """The core logs every connection: over days that is hundreds of megabytes. Keep the files small."""
+    try:
+        if os.path.getsize(LOGFILE) > 16 * 1024 * 1024:
+            open(LOGFILE, "w").close()  # the core appends: it goes on from the start
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def salvage_outs(outs, work_path=None):
+    """The core refused the whole config: ask it about each server on its own. Returns (good, bad), so one server
+    with data the core does not accept costs only itself. Slow (one core start per server): only for that case."""
+    work_path = work_path or CHECKCFG
+    good, bad = [], []
+    for o in outs:
+        write_json(work_path, build_config([o], o["tag"], False, []))
+        (good if core_check(work_path)[0] else bad).append(o)
+    return good, bad
+
+
+def clean_domains(text):
+    """Domains typed into «Свои домены»: separators of any kind, pasted links and wildcards are tolerated, what is
+    not a domain is dropped (one stray character used to make the core refuse the whole config)."""
+    out = []
+    for tok in re.split(r"[\s,;]+", text or ""):
+        tok = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://", "", tok.strip().lower())
+        tok = re.split(r"[/?#:]", tok)[0].lstrip("*.").strip(".")
+        try:
+            tok = tok.encode("idna").decode("ascii")  # домены на кириллице: как их видит сеть
+        except UnicodeError:
+            continue
+        if tok and re.fullmatch(r"[a-z0-9_-]+(\.[a-z0-9_-]+)*", tok) and tok not in out:
+            out.append(tok)
+    return out
 
 
 def build_home_config(nic=None):
@@ -1174,6 +1358,9 @@ class App(tk.Tk):
         S = max(1.0, float(self.tk.call("tk", "scaling")) / 1.3333)
         def on_error(*a):
             log_crash(*a)
+            if time.time() - getattr(self, "_last_err", 0.0) < 30:  # an error repeating every half second must not pile up dialogs
+                return
+            self._last_err = time.time()
             try:
                 show_error(self, "Ошибка: " + str(a[1]) + "\nПодробности: " + os.path.join(DATA, "crash.log"))
             except Exception:  # noqa: BLE001
@@ -1198,6 +1385,9 @@ class App(tk.Tk):
         self.f_h, self.f_b, self.f_s = (fam, FZ(12), "bold"), (fam, FZ(11)), (fam, FZ(10))
         self.proc = None
         self.test_proc = None
+        self.test_skip = set()  # rows of the server list the core refused in the last test
+        self.restarts = []  # when the connection was brought back after the core stopped on its own
+        self._last_err = 0.0
         self.testing = False
         self.test_stop = threading.Event()
         self.results = {}
@@ -1238,11 +1428,11 @@ class App(tk.Tk):
                     "skip_home": True,  # auto mode passes over servers that exit in the user's own blocking country
                     "tray_on_close": True, "tray_hint_shown": False}
         try:
-            self.cfg.update(json.load(open(SETTINGS, encoding="utf-8-sig")))
+            self.cfg = merge_cfg(self.cfg, json.load(open(SETTINGS, encoding="utf-8-sig")))
         except Exception:
             pass
         try:
-            self.subs = json.load(open(SUBCACHE, encoding="utf-8"))
+            self.subs = clean_subs(json.load(open(SUBCACHE, encoding="utf-8")))
         except Exception:
             pass
         self.home_cc = self.cfg.get("home_cc") if isinstance(self.cfg.get("home_cc"), str) else None  # where this computer is
@@ -1628,15 +1818,18 @@ class App(tk.Tk):
 
     def home_worker(self):
         """At start: ask where this computer really is (not where a running VPN is), in the background."""
-        self.clean_done.wait(10)  # a leftover core of ours would answer with its own exit
-        nic = physical_nic()
-        if IS_LINUX and self.state == "off":
-            nic = None
-        if not nic and self.state != "off":
-            return  # a VPN is up and the real adapter is unknown: any answer would be the tunnel's
-        cc = detect_home(nic)
-        if cc:
-            self._ui(lambda: self.set_home(cc))
+        try:
+            self.clean_done.wait(10)  # a leftover core of ours would answer with its own exit
+            nic = physical_nic()
+            if IS_LINUX and self.state == "off":
+                nic = None
+            if not nic and self.state != "off":
+                return  # a VPN is up and the real adapter is unknown: any answer would be the tunnel's
+            cc = detect_home(nic)
+            if cc:
+                self._ui(lambda: self.set_home(cc))
+        except Exception:  # noqa: BLE001
+            pass
 
     def set_home(self, cc):
         changed = cc != self.home_cc
@@ -1913,6 +2106,8 @@ class App(tk.Tk):
         country (flags), and, if the ping is off, a bare alive check so a speed test knows whom to try.
         Returns (ping ms or None, country or None, alive True/False/None)."""
         flags_on, ping_on, _ = plan
+        if i in self.test_skip:
+            return None, None, False  # the core refused this server's data
         port = TEST_BASE_PORT + i
         ms = probe_ping(port) if ping_on else None
         alive = (ms is not None) if ping_on else None
@@ -1994,15 +2189,22 @@ class App(tk.Tk):
             if not nic and self.state != "off":
                 raise RuntimeError("не нашёл сетевой адаптер для замера мимо VPN")
             outs = resolve_servers(outs)
+            self.test_skip = set()
             write_json(TESTCFG, build_test_config(outs, nic))
             open(TESTLOG, "w").close()
-            chk = subprocess.run([CORE, "check", "-c", TESTCFG], capture_output=True, text=True, creationflags=NOWIN)
-            if chk.returncode != 0:
-                raise RuntimeError("конфиг не прошёл проверку: " + (chk.stderr or chk.stdout).strip()[-200:])
+            ok, msg = core_check(TESTCFG)
+            if not ok:  # one server the core does not accept must not spoil the test of all the others
+                good, bad = salvage_outs(outs, CHECKCFG)
+                self.test_skip = {i for i, o in enumerate(outs) if any(o is b for b in bad)}
+                if good and self.test_skip:
+                    write_json(TESTCFG, build_test_config(outs, nic, self.test_skip))
+                    ok, msg = core_check(TESTCFG)
+            if not ok:
+                raise RuntimeError("конфиг не прошёл проверку: " + msg[-200:])
             self.test_proc = subprocess.Popen([CORE, "run", "-c", TESTCFG], cwd=DATA, creationflags=NOWIN,
                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             own(self.test_proc)
-            last = TEST_BASE_PORT + len(outs) - 1
+            last = TEST_BASE_PORT + max(i for i in range(len(outs)) if i not in self.test_skip)
             deadline = time.time() + 10
             while True:
                 if self.test_proc.poll() is not None:
@@ -2114,26 +2316,85 @@ class App(tk.Tk):
         if karing_running() and not ask_yes_no(self, "Запущен другой VPN-клиент (Karing / v2rayN / Hiddify / NekoRay).\n"
                      "Два VPN сразу конфликтуют. Отключи его и нажми «Да», либо «Нет» для отмены."):
             return
+        if not os.path.isfile(CORE):
+            self.say("Нет файла ядра VPN. Скорее всего, его удалил антивирус.", err=True)
+            return show_error(self, "Не найден файл ядра VPN:\n" + CORE + "\n\nСкорее всего, его удалил антивирус. "
+                                    "Добавь программу в исключения антивируса и запусти её заново (или скачай заново).")
         self.api = (free_port(), secrets.token_hex(16))  # new secret per connection, loopback only
         self.current = ""
-        cfg = build_config(self.outs, self.chosen(), self.ru.get(), self.extra.get().split(), self.api,
-                           self.auto_pool())
-        json.dump(cfg, open(RUNCFG, "w", encoding="utf-8"), indent=1)
         open(LOGFILE, "w").close()
         self._pos = 0
-        chk = subprocess.run([CORE, "check", "-c", RUNCFG], capture_output=True, text=True, creationflags=NOWIN)
-        if chk.returncode != 0:
+        ok, msg, note = self.prepare_config()
+        if not ok:
             self.toggle_log(True)
             self.say("Конфиг не прошёл проверку, подробности в логе.", err=True)
-            return show_error(self, "Ошибка конфига:\n" + (chk.stderr or chk.stdout)[-800:])
-        self.proc = start_core(RUNCFG)
+            return show_error(self, "Ошибка конфига:\n" + msg[-800:])
+        try:
+            self.proc = start_core(RUNCFG)
+        except OSError as e:  # blocked by an antivirus, no rights, file locked
+            self.say("Ядро VPN не запустилось.", err=True)
+            return show_error(self, f"Не удалось запустить ядро VPN: {e}\n\nПроверь антивирус и права на папку программы.")
         self.active = self.sel_name()
         self.state = "connecting"
         self.t_conn = time.time()
-        self.say("" if IS_WIN else "Подтверди права администратора в окне системы.")
+        self.say(" ".join(t for t in (note, "" if IS_WIN else "Подтверди права администратора в окне системы.") if t))
         self.refresh_power()
 
+    def prepare_config(self):
+        """Write the config to connect with. If the core refuses it, repair what can be repaired instead of giving up:
+        a damaged downloaded rule list is dropped (the bundled copy takes over), a server whose data the core does not
+        accept is left out. Returns (ok, core message, note for the user)."""
+        outs, chosen, pool, extra = self.outs, self.chosen(), self.auto_pool(), clean_domains(self.extra.get())
+        mixed = pick_port(MIXED_PORT)
+        notes = [] if mixed == MIXED_PORT else [f"Порт {MIXED_PORT} занят, локальный прокси на порту {mixed}."]
+
+        def write():
+            write_json(RUNCFG, build_config(outs, chosen, self.ru.get(), extra, self.api, pool, mixed))
+        write()
+        ok, msg = core_check(RUNCFG)
+        healed = salvaged = False
+        while not ok and not (healed and salvaged):
+            if not healed and "rule-set" in msg.lower():
+                healed = True
+                drop_downloaded_rules()
+                self.cfg["rules_ok"] = 0  # fetch a fresh copy at the next chance
+                notes.append("Список российских сайтов был повреждён, взял встроенный.")
+            elif not salvaged:
+                salvaged = True
+                self.say("Проверяю серверы по одному…")
+                self.update_idletasks()
+                good, bad = salvage_outs(outs)
+                if not (good and bad):
+                    break
+                names = {o["tag"] for o in good}
+                outs = good
+                chosen = chosen if chosen in names else "AUTO"
+                pool = [t for t in pool if t in names] or [o["tag"] for o in good]
+                notes.append(f"Пропущено серверов с неверными данными: {len(bad)}.")
+            else:
+                break
+            write()
+            ok, msg = core_check(RUNCFG)
+        return ok, msg, " ".join(notes)
+
+    def may_restart(self):
+        """At most 3 automatic reconnects in 10 minutes: a core that keeps dying must not loop forever."""
+        now = time.time()
+        self.restarts = [t for t in self.restarts if now - t < 600]
+        if len(self.restarts) >= 3:
+            return False
+        self.restarts.append(now)
+        return True
+
+    def reconnect(self):
+        if self.state != "off" or self.quitting or self.installing:
+            return
+        if karing_running():
+            return self.say("Соединение оборвалось. Другой VPN-клиент включён, подключись вручную.", err=True)
+        self.toggle()
+
     def fail(self):
+        was_on = self.state == "on" and time.time() - self.t0 > 15  # it had worked: not a bad config
         rc = self.proc.poll() if self.proc else None
         err = ""
         try:
@@ -2143,6 +2404,10 @@ class App(tk.Tk):
         self.stop()
         if not IS_WIN and (rc in (126, 127) or "cancel" in err.lower()):
             return self.say("Не получены права администратора (окно пароля закрыто или недоступно).", err=True)
+        if IS_WIN and was_on and self.may_restart():  # on Linux/macOS a new connection needs the password again
+            self.say("Соединение оборвалось, подключаюсь заново…", err=True)
+            self.after(1500, self.reconnect)
+            return
         self.say("Ядро остановилось, подробности в логе.", err=True)
         self.toggle_log(True)
 
@@ -2188,6 +2453,15 @@ class App(tk.Tk):
             self.refresh_power()
 
     def tick(self):
+        try:
+            self._tick()
+        except Exception:  # noqa: BLE001
+            log_crash(*sys.exc_info())  # logged; the loop that watches the core goes on
+        finally:
+            if not self.quitting:
+                self._tick_id = self.after(500, self.tick)
+
+    def _tick(self):
         self.n += 1
         self.blink = not self.blink
         if self.state in ("on", "connecting"):
@@ -2206,13 +2480,14 @@ class App(tk.Tk):
                 self.say("")
                 self.refresh_power()
         if self.n % 120 == 0:  # every minute
+            if trim_logs():
+                self._pos = 0
             self.refresh_due()
             self.update_rules_due()
         if self.n % 43200 == 0 and self.cfg.get("auto_update"):  # every 6 hours
             self.update_check()
         if self.proc and self.proc.poll() is not None and self.state != "off":
             self.fail()
-        self._tick_id = self.after(500, self.tick)
 
     def tail(self):
         try:
@@ -2414,4 +2689,14 @@ if __name__ == "__main__":
         updater.cleanup(UPDATE_DIR)  # what a finished update left behind
     if apply_pending_update():
         sys.exit(0)  # the helper swaps the files after we exit and starts the new version
-    App().mainloop()
+    try:
+        app = App()
+    except Exception:  # noqa: BLE001
+        log_crash(*sys.exc_info())
+        for _p in (SETTINGS, SUBCACHE, EXITFILE):  # most likely a damaged data file: keep it as .bad and start clean
+            try:
+                os.replace(_p, _p + ".bad")
+            except OSError:
+                pass
+        app = App()
+    app.mainloop()
