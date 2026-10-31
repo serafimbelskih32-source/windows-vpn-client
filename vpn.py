@@ -799,6 +799,7 @@ class Dialog(tk.Toplevel):
         tk.Frame(body, bg=RED if kind == "error" else BLUE, width=P(10)).pack(side="left", fill="y")
         inner = tk.Frame(body, bg=BG)
         inner.pack(side="left", padx=P(22), pady=P(20))
+        text = text if len(text) <= 1200 else text[:1197] + "…"  # a message taller than the screen could not be read or closed
         tk.Label(inner, text=text, font=(fam, FZ(11)), bg=BG, fg=INK, justify="left", anchor="w",
                  wraplength=P(400)).pack(fill="x", pady=(0, P(18)))
         row = tk.Frame(inner, bg=BG)
