@@ -1042,7 +1042,6 @@ app13.state = "off"
 app13.proc = None
 
 # 5c. the window never grows past the screen: the footer with «Лог» and «Настройки» stays reachable
-real_sh = app13.winfo_screenheight
 
 def frame_bottom(a):
     """Bottom edge of the window's frame on the screen."""
@@ -1056,7 +1055,7 @@ def inside(a, screen_h):
 
 
 for scr in (900, 768, 600):  # screens of any height: with everything open the window stays inside, the footer in view
-    app13.winfo_screenheight = lambda scr=scr: scr
+    app13.work_area = lambda scr=scr: (0, scr)
     for opened in ("settings", "log", "both"):
         app13.toggle_settings(opened in ("settings", "both"))
         app13.toggle_log(opened in ("log", "both"))
@@ -1064,7 +1063,7 @@ for scr in (900, 768, 600):  # screens of any height: with everything open the w
         check(f"a {scr}-px screen, {opened} open: the whole window frame and the footer are on the screen",
               inside(app13, scr), (app13.winfo_y(), frame_bottom(app13), app13.work_area(), app13.winfo_height()))
         check("... the window can be minimised and moved: its title bar is not above the screen", app13.winfo_y() >= app13.work_area()[0], app13.winfo_y())
-app13.winfo_screenheight = lambda: 900
+app13.work_area = lambda: (0, 900)
 app13.toggle_settings(True); app13.toggle_log(True)
 app13.update()
 check("content taller than the window: the body scrolls (a bar is shown) instead of growing the window",
@@ -1075,7 +1074,7 @@ check("... and scrolled to the end the last row is visible, the footer never mov
       app13.foot.winfo_rooty() + app13.foot.winfo_height() <= app13.winfo_rooty() + app13.winfo_height()
       and app13.log_box.winfo_rooty() + app13.log_box.winfo_height() <= app13.foot.winfo_rooty() + 2)
 app13.canvas.yview_moveto(0)
-app13.winfo_screenheight = lambda: 2000
+app13.work_area = lambda: (0, 2000)
 app13.toggle_settings(False); app13.toggle_log(False)
 app13.toggle_settings(True)
 app13.update()
@@ -1083,14 +1082,14 @@ check("tall screen: the list has its normal size again and no bar is shown", int
       (app13.tree.cget("height"), app13._bar_on))
 app13.toggle_settings(False)
 # a window dragged down so that its lower part is off the screen is pulled back when it grows
-app13.winfo_screenheight = lambda: 900
+app13.work_area = lambda: (0, 900)
 app13.geometry(f"+{app13.winfo_x()}+{app13.work_area()[1] - 200}")
 app13.update()
 app13.toggle_settings(True)
 app13.update()
 check("a window low on the screen is pulled up when the panel opens", inside(app13, 900), (app13.winfo_y(), frame_bottom(app13), app13.work_area()))
 app13.toggle_settings(False)
-app13.winfo_screenheight = real_sh
+del app13.work_area  # the real screen again
 app13.fit_height()
 
 check("the smallest size the window may be shrunk to never exceeds a small screen",
