@@ -10,6 +10,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # test names are Russian; a Windows runner's console is cp1252
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import updater  # noqa: E402
 

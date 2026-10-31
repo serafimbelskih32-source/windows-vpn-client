@@ -2217,6 +2217,7 @@ class App(tk.Tk):
         the 80-character text fields make that wider than the window)."""
         self.update_idletasks()
         avail = self.avail_height()
+        self.minsize(P(440), min(P(560), avail))  # the screen may have changed since the start (another monitor, resolution)
         rows = 6
         while True:  # the window asks for the body's height plus the footer; the server list gives way until that fits
             self.tree.configure(height=rows)
