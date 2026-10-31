@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # test names are Russian; a Windows runner's console is cp1252
 os.environ["FIMA_NO_TRAY"] = "1"
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import vpn  # noqa: E402
