@@ -67,7 +67,7 @@ jobs:
           fi
           ls -la core
 
-      - name: Download Xray (it runs what the core cannot: XHTTP and the like)
+      - name: Download Xray (it runs what the core cannot, XHTTP and the like)
         shell: bash
         run: |
           set -e
