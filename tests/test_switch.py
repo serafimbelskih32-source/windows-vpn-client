@@ -266,7 +266,7 @@ try:
 
     # ----- the core's own check of a server -----
     d = vpn.server_delay(API, "🇩🇪 A", f"http://127.0.0.1:{PPORT}/204")
-    check("the core measures a working server without switching to it", isinstance(d, (int, float)) and 0 < d < 3000 and vpn.current_server(API) == "🇩🇪 A", d)
+    check("the core measures a working server without switching to it", isinstance(d, (int, float)) and 0 <= d < 3000 and vpn.current_server(API) == "🇩🇪 A", repr(d))
     check("... and says None for the one that does not answer", vpn.server_delay(API, "dead", f"http://127.0.0.1:{PPORT}/204", 2000) is None)
     check("... and for one it does not have", vpn.server_delay(API, "nobody", f"http://127.0.0.1:{PPORT}/204", 2000) is None)
 finally:

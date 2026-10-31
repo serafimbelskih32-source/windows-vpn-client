@@ -2082,7 +2082,7 @@ def server_delay(api, tag, url, timeout_ms=4000):
     path = f"/proxies/{urllib.parse.quote(tag, safe='')}/delay?url={urllib.parse.quote(url, safe='')}&timeout={int(timeout_ms)}"
     status, got = core_api(api, "GET", path, timeout=timeout_ms / 1000 + 3)
     d = got.get("delay")
-    return d if status == 200 and isinstance(d, (int, float)) and d > 0 else None
+    return d if status == 200 and isinstance(d, (int, float)) and not isinstance(d, bool) and d >= 0 else None  # 0 ms is a real answer (loopback)
 
 
 def resolve_servers(outs):
@@ -3293,10 +3293,10 @@ class App(tk.Tk):
             name = flags.strip_flag(now or target)
             if now and ms is None:
                 self.say(T("Сервер «{0}» не отвечает. Через него трафик не идёт, мимо VPN ничего не уходит. Выбери другой сервер.").format(name), err=True)
-            elif ms and self.chosen() == "AUTO":
+            elif ms is not None and self.chosen() == "AUTO":
                 sp = self.results.get(now or target, (None, None))[1]
                 self.say(T("Автовыбор: «{0}», отклик {1:.0f} мс").format(name, ms) + (", " + fmt_speed(sp) if choice.usable(sp) else "") + ".")
-            elif ms:
+            elif ms is not None:
                 self.say(T("Теперь «{0}», отклик {1:.0f} мс.").format(name, ms))
             else:
                 self.say(T("Теперь «{0}».").format(name))
