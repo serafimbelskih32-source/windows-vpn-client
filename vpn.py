@@ -1868,7 +1868,7 @@ class App(tk.Tk):
         Flat(row, "Вставить", self.paste_clip, self.f_s).pack(side="right", padx=(0, P(8)))
         self.sub_note = tk.Label(row, text="", font=self.f_s, bg=BG, fg=MUTE)
         self.sub_note.pack(side="left", padx=(P(10), 0))
-        sbx = tk.Frame(root, bg=INK, padx=P(2), pady=P(2))
+        sbx = self.sbx = tk.Frame(root, bg=INK, padx=P(2), pady=P(2))  # last block of the content; the panels open right below it
         sbx.pack(fill="x")
         self.src = tk.Text(sbx, height=3, wrap="char", font=(MONO, FZ(9)), bg=PAPER, fg=INK, relief="flat", bd=0,
                            highlightthickness=0, insertbackground=INK, selectbackground=BLUE,
@@ -1914,7 +1914,7 @@ class App(tk.Tk):
 
         # footer: deliberately quiet. Small grey links; the version on the right.
         self.foot = tk.Frame(root, bg=BG)
-        self.foot.pack(fill="x", pady=(P(14), 0))
+        self.foot.pack(side="bottom", fill="x", pady=(P(14), 0), before=root.pack_slaves()[0])  # first in the packing order: when the window is too short something else is cut, never this row
         self.log_head = self.quiet_link(self.foot, "Лог", self.toggle_log)
         self.log_head.pack(side="left")
         self.set_head = self.quiet_link(self.foot, "Настройки", self.toggle_settings, double=self.open_pro)
@@ -2093,7 +2093,7 @@ class App(tk.Tk):
         self.log_head.open = self.log_open
         self.log_head.paint(False)
         if self.log_open:
-            self.log_box.pack(fill="x", before=self.foot)  # panels open above the footer, which never moves
+            self.log_box.pack(fill="x", after=self.set_box if self.set_open else self.sbx)  # panels open above the footer, which never moves
         else:
             self.log_box.pack_forget()
         self.fit_height()
@@ -2118,7 +2118,7 @@ class App(tk.Tk):
         self.set_head.open = self.set_open
         self.set_head.paint(False)
         if self.set_open:
-            self.set_box.pack(fill="x", before=self.foot)
+            self.set_box.pack(fill="x", after=self.sbx)
         else:
             self.set_box.pack_forget()
         self.fit_height()

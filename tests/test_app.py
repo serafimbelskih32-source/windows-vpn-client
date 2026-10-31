@@ -598,8 +598,16 @@ check("settings are folded by default", app6.set_box.winfo_manager() == "" and a
 app6.toggle_settings()
 app6.update()
 order = app6.foot.master.pack_slaves()
-check("the settings link opens the panel above the footer", app6.set_box.winfo_manager() == "pack"
-      and order.index(app6.set_box) < order.index(app6.foot) and order[-1] is app6.foot, [str(w) for w in order[-3:]])
+check("the settings link opens the panel right below the content; the footer is first in the packing order (never the part that is cut)",
+      app6.set_box.winfo_manager() == "pack" and order[0] is app6.foot and order.index(app6.sbx) < order.index(app6.set_box),
+      [str(w) for w in order])
+app6.toggle_log(True)
+app6.update()
+order = app6.foot.master.pack_slaves()
+check("with the log open too: content, settings, log, and the footer still first in the order",
+      order[0] is app6.foot and order.index(app6.sbx) < order.index(app6.set_box) < order.index(app6.log_box))
+app6.toggle_log(False)
+app6.update()
 app6.toggle_settings()
 app6.update()
 check("... and closes it again", app6.set_box.winfo_manager() == "")
