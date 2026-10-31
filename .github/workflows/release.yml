@@ -84,7 +84,7 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python tests/gui_smoke.py; else python tests/gui_smoke.py; fi
 
       - name: Pictures of the windows (to look at the design on this system)
-        if: github.event_name == 'workflow_dispatch'
+        if: always() && github.event_name == 'workflow_dispatch'
         continue-on-error: true
         shell: bash
         run: |
@@ -95,7 +95,7 @@ jobs:
           run shots/dark-1.0 1.0 theme=dark accent=green
 
       - uses: actions/upload-artifact@v4
-        if: github.event_name == 'workflow_dispatch'
+        if: always() && github.event_name == 'workflow_dispatch'
         with:
           name: shots-${{ matrix.name }}
           path: shots

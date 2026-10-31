@@ -204,12 +204,34 @@ try:
     app.update()
     check("a text field has an even outline (the entry sits in a paper frame inside it)", bx.cget("bg") == vpn.INK and entry.master.cget("bg") == vpn.PAPER)
 
+    # an empty list and an empty box say what to do
+    app.cfg["sources"] = ""
+    app.src.delete("1.0", "end")
+    app.apply_outs()
+    app.sync_hints()
+    settle(app, 4)
+    check("an empty server list says what to do", app.empty.winfo_manager() == "place" and "ссылку подписки" in app.empty.cget("text"))
+    check("an empty subscription box shows a hint with the kinds of links", app.src_hint.winfo_manager() == "place" and "vless://" in app.src_hint.cget("text"))
+    app.src.insert("1.0", "https://x.example/sub")
+    app.sync_hints()
+    check("the box hint goes as soon as there is text", app.src_hint.winfo_manager() == "")
+    app.src.delete("1.0", "end")
+    app.subs = {"https://u.example/s": {"outs": vpn.parse_text("vless://11111111-2222-3333-4444-555555555555@h.example:443?security=tls#A"), "info": {}, "time": time.time(), "ua": "x"}}
+    app.cfg["sources"] = "https://u.example/s"
+    app.apply_outs()
+    check("the list hint goes when there are servers", app.empty.winfo_manager() == "", app.empty.winfo_manager())
+    app.subs, app.cfg["sources"] = {}, ""
+    app.apply_outs()
+
     # live settings
     app.cfg["pro"] = {"alpha": 80, "on_top": True, "shadow": False, "anim": False, "win_width": 520}
     app.apply_live()
     settle(app, 6)
     try:
-        check("opacity and always-on-top apply at once", abs(float(app.attributes("-alpha")) - 0.8) < 0.02 and bool(app.attributes("-topmost")))
+        if vpn.IS_LINUX:  # a bare X server (CI) has no window manager to honour either
+            print("     (Linux: opacity and always-on-top depend on the window manager: not checked)")
+        else:
+            check("opacity and always-on-top apply at once", abs(float(app.attributes("-alpha")) - 0.8) < 0.02 and bool(app.attributes("-topmost")))
     except Exception:  # noqa: BLE001
         print("     (this window manager has no alpha/topmost: skipped)")
     check("the shadow and blinking switches apply at once", vpn.SHADOW is False and vpn.ANIM is False)
@@ -290,12 +312,13 @@ t0 = time.time()
 vpn.wait_for_exit(2 ** 22 + 12345, 5)
 check("waiting for a process that does not exist returns at once", time.time() - t0 < 2.5, time.time() - t0)
 import subprocess  # noqa: E402
+import threading  # noqa: E402
 child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.2)"])
+threading.Thread(target=child.wait, daemon=True).start()  # reaped the moment it ends (a zombie would still "exist")
 t0 = time.time()
 vpn.wait_for_exit(child.pid, 10)
 el = time.time() - t0
 check("waiting for a live process lasts until it ends", 0.6 < el < 6, el)
-child.wait()
 
 print("\nFAILED:" if fails else "\nALL PASSED", fails if fails else "")
 sys.exit(1 if fails else 0)

@@ -874,7 +874,7 @@ PRO_NARROW = ("ui_scale", "border", "win_width", "alpha", "accent_hex")  # short
 PRO_LAYOUT = (
     ("Оформление", (
         ("theme", "Тема", "choice", "«Как в системе» берёт светлую или тёмную у вашей системы."),
-        ("accent", "Цвет акцента", "choice", None),
+        ("accent", "Цвет акцента", "choice", "В контрастной теме акцент всегда синий, если не задан свой цвет."),
         ("accent_hex", "Свой цвет акцента", "entry", "Вида #1E3CFF. Если заполнено, берётся он, а не цвет из списка."),
         ("ui_scale", "Масштаб интерфейса, %", "entry", "От 70 до 180. Поверх масштаба самой системы."),
         ("density", "Список серверов", "choice", None),
@@ -1924,6 +1924,8 @@ class App(tk.Tk):
         self.tree.tag_configure("home", foreground=MUTE)  # servers «Быстрейший из списка» passes over
         self.tree.bind("<Configure>", self.fit_tree_columns, add="+")
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
+        self.empty = tk.Label(frame, text="Серверов пока нет.\n\nВставь ссылку подписки или ключ в поле «Подписки» ниже "
+                                          "и нажми «Обновить».", font=self.f_s, bg=PAPER, fg=MUTE, justify="center", wraplength=P(300))
         self.tree.bind("<Double-1>", lambda e: self.toggle() if self.state == "off" else None)
 
         # routing
@@ -1954,6 +1956,12 @@ class App(tk.Tk):
                            selectforeground=ONACCENT, padx=P(6), pady=P(5))
         self.src.pack(fill="x")
         self.src.insert("1.0", self.cfg["sources"])
+        self.src_hint = tk.Label(self.src, text="Ссылка подписки (https://…) или ключ (vless://, vmess://, trojan://, ss://, hysteria2://…). "
+                                                "Можно вставить несколько, по одной в строке.", font=(self.fam, FZ(9)), bg=PAPER, fg=MUTE,
+                                 justify="left", anchor="w", wraplength=P(380), cursor="xterm")
+        self.src_hint.bind("<Button-1>", lambda e: self.src.focus_set())
+        for ev in ("<KeyRelease>", "<FocusIn>", "<FocusOut>", "<ButtonRelease-1>"):
+            self.src.bind(ev, lambda e: self.sync_hints(), add="+")
 
         # log (folded)
         self.log_open = False
@@ -2017,6 +2025,7 @@ class App(tk.Tk):
         self._pump_id = self.after(50, self.pump)
         self.start_instance_server()
         self.after(300, self.refresh_due)
+        self.sync_hints()
         self.restore_window()
         self.apply_live()
         self.after(120, lambda: self.fit_height(P(840)))
@@ -2121,7 +2130,7 @@ class App(tk.Tk):
         try:
             self.update_idletasks()
             rows = max([r.winfo_reqwidth() for r in getattr(self, "_rows", [])] + [self.foot.winfo_reqwidth()] + [0]) + P(24)
-            tree = sum(self.col_w.values()) + P(170) + P(10) + 4 * BW() + P(8)
+            tree = sum(self.col_w.values()) + P(190) + P(10) + 4 * BW() + P(8)  # numbers, then room for a server name
             return max(rows, tree) + 2 * P(22) + P(4)
         except (tk.TclError, AttributeError):
             return 0
@@ -2472,6 +2481,7 @@ class App(tk.Tk):
         cur = self.src.get("1.0", "end").strip()
         self.src.delete("1.0", "end")
         self.src.insert("1.0", (cur + "\n" if cur else "") + txt.strip())
+        self.sync_hints()
         self.load()
 
     def show_cached(self):
@@ -2558,6 +2568,7 @@ class App(tk.Tk):
         self.note_subs()
         if not outs:
             self.count.config(text="Пусто")
+            self.sync_hints()
             self.say("Серверов нет. Проверь ссылку или ключ.", err=True)
             if manual and not silent:
                 show_error(self, "Не удалось получить серверы.\n\nЧто сделать: проверь, что ссылка подписки скопирована целиком "
@@ -2585,7 +2596,24 @@ class App(tk.Tk):
             self.tree.yview_moveto(top)
         self.count.config(text=str(len(outs)))
         self.paint_rows()  # the list was rebuilt: keep the live row marked, mute the skipped ones
+        self.sync_hints()
         self.save(sources=manual)
+
+    def sync_hints(self):
+        """The hint in an empty server list, and the one in an empty subscription box (gone as soon as there is text or
+        the cursor is in the box)."""
+        try:
+            if self.tree.get_children():
+                self.empty.place_forget()
+            else:
+                self.empty.place(relx=0.5, rely=0.5, anchor="center")
+                self.empty.lift()
+            if self.src.get("1.0", "end").strip() or self.focus_get() is self.src:
+                self.src_hint.place_forget()
+            else:
+                self.src_hint.place(x=P(8), y=P(5))
+        except tk.TclError:
+            pass
 
     def note_subs(self):
         """'обновлено в 14:05' = when the least fresh subscription was last fetched successfully."""
