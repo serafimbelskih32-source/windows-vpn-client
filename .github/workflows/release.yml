@@ -97,9 +97,11 @@ jobs:
           python tests/test_sources.py
           python tests/test_i18n.py
           python tests/test_engines.py
+          python tests/test_choice.py
+          python tests/test_switch.py
           python tests/test_robust.py
           # the window-level suite hangs inside Tk's update() on the macOS runner (not understood yet): Windows and Linux only
-          if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python tests/test_app.py; xvfb-run -a python tests/test_design.py; xvfb-run -a python tests/test_features.py; xvfb-run -a python tests/test_english.py; elif [ "$RUNNER_OS" = "Windows" ]; then python tests/test_app.py; python tests/test_design.py; python tests/test_features.py; python tests/test_english.py; fi
+          if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python tests/test_app.py; xvfb-run -a python tests/test_design.py; xvfb-run -a python tests/test_features.py; xvfb-run -a python tests/test_english.py; xvfb-run -a python tests/test_autochoice.py; elif [ "$RUNNER_OS" = "Windows" ]; then python tests/test_app.py; python tests/test_design.py; python tests/test_features.py; python tests/test_english.py; python tests/test_autochoice.py; fi
           python vpn.py --selftest < tests/sample_links.txt
           if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a python tests/gui_smoke.py; else python tests/gui_smoke.py; fi
 

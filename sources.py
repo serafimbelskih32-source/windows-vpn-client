@@ -934,13 +934,16 @@ def skipped_note(skipped):
     return T("Пропущено {0} {1}, которые программа не умеет запускать ({2}).").format(n, word, parts)
 
 
+RESERVED_TAGS = ("proxy", "direct", "AUTO", "fima-auto")  # names the program's own config uses; "fima-auto" = vpn.AUTO_TAG
+
+
 def _unique_tags(outs):
     """Every server gets a non-empty tag of its own that does not collide with the config's reserved ones."""
     seen = {}
     for o in outs:
         t = o.get("tag") or f"{o['type']}-{o.get('server', '?')}:{o.get('server_port', '')}"
         t = t.strip()[:120] or f"{o['type']}-{o.get('server', '?')}"
-        if t in ("proxy", "direct", "AUTO"):
+        if t in RESERVED_TAGS:
             t += " (node)"
         if t in seen:
             seen[t] += 1

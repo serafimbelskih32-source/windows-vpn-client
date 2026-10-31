@@ -124,8 +124,8 @@ for i, o in enumerate(app.outs):
 app.toggle_pin(2)
 app.sort_rows()
 EN = os.environ["FIMA_LANG"] == "en"
-app.say((vpn.T("Самый быстрый: {0} ({1}).").format("Finland", "140 Mbit/s, 55 ms") + vpn.T(" Скорость измерена загрузкой с {0}.").format("speed.cloudflare.com")) if EN else
-        "Самый быстрый: Финляндия (140 Мбит/с, 55 мс). Скорость измерена загрузкой с speed.cloudflare.com.")
+app.say((vpn.T("Лучший выбор: {0} ({1}).").format("Finland", "140 Mbit/s, 55 ms") + vpn.T(" Скорость измерена загрузкой с {0}.").format("speed.cloudflare.com")) if EN else
+        "Лучший выбор: Финляндия (140 Мбит/с, 55 мс). Скорость измерена загрузкой с speed.cloudflare.com.")
 shot(app, "01_main_off")
 
 app.state, app.api, app.current, app.t0 = "on", ("x", "y"), app.outs[1]["tag"], time.time() - 3725

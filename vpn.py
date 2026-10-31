@@ -22,11 +22,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import tkinter as tk
 from tkinter import font as tkfont
 import urllib.error
+import urllib.parse
 import urllib.request
 from tkinter import messagebox, ttk
 from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 import http.client
 
+import choice
 import engines
 import flags
 import i18n
@@ -66,6 +68,7 @@ UPDATE_DIR = updater.update_dir(DATA)  # a downloaded, verified update waits her
 SETTINGS = os.path.join(DATA, "settings.json")
 i18n.set_language(i18n.initial_language(SETTINGS))  # before any text below is made
 AUTO_LABEL = T("Быстрейший из списка")
+AUTO_TAG = "fima-auto"  # the core's own "pick the best by itself" group, a member of the "proxy" selector (see build_config)
 RUNCFG = os.path.join(DATA, "run.json")
 LOGFILE = os.path.join(DATA, "sing-box.log")
 TESTCFG = os.path.join(DATA, "test.json")
@@ -117,6 +120,8 @@ RU_SUFFIXES = regions.suffixes("RU")
 RULE_SETS = regions.rule_sets("RU")
 LOCAL_DNS = "77.88.8.8"  # what resolves the chosen country's sites; '' = the system's resolver (set from the region at start)
 RULES_EVERY = 7 * 24 * 3600
+QUICK_TOP, QUICK_SECS = 6, 3.0  # the background test of the auto mode: this many servers, this many seconds of speed each
+REVIEW_EVERY = 30 * 60  # speeds are measured again after this long
 RULES_RETRY = 6 * 3600
 
 
@@ -472,6 +477,8 @@ PRO_FIELDS = {
     "auto_url": ("https://www.gstatic.com/generate_204", "url", None),
     "auto_interval": (3, "int", (1, 60)),
     "auto_tolerance": (50, "int", (0, 1000)),
+    "auto_focus": ("balanced", "choice", tuple(choice.FOCUS)),
+    "auto_speed": (True, "bool", None),
     "test_top": (8, "int", (1, 50)),
     "test_secs": (4, "int", (1, 30)),
     "test_parallel": (64, "int", (1, 128)),
@@ -484,6 +491,7 @@ PRO_LABELS = {  # what the segmented choices say (the stored value is the key)
     "accent": {"blue": T("Синий"), "green": T("Зелёный"), "orange": T("Оранжевый"), "violet": T("Фиолетовый"), "pink": T("Розовый")},
     "density": {"compact": T("Плотный"), "normal": T("Обычный"), "roomy": T("Свободный")},
     "ui_font": {"auto": T("Как задумано"), "condensed": T("Узкий"), "regular": T("Обычный"), "mono": T("Моноширинный")},
+    "auto_focus": {"balanced": T("Поровну"), "latency": T("Отклик"), "speed": T("Скорость")},
 }
 FONT_CHOICES = {
     "auto": UI_FONTS,
@@ -601,6 +609,13 @@ def local_dns_server(addr):
     return {"type": "udp", "tag": "local", "server": addr} if addr else {"type": "local", "tag": "local"}
 
 
+def selector_default(tags, chosen):
+    """What the "proxy" selector starts on: the server picked by hand, else (several servers) the "pick the best" group."""
+    if len(tags) > 1 and (chosen == "AUTO" or chosen not in tags):
+        return AUTO_TAG
+    return chosen if chosen in tags else tags[0]
+
+
 def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None, mixed_port=None, pro=None, xray_ports=None, region="RU"):
     """`api` = (port, secret): expose the core's local API so the window can show which server auto mode picked.
     `auto_tags`: the servers «Быстрейший из списка» may choose from (default: all); a hand-picked server is always allowed.
@@ -611,10 +626,17 @@ def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None
     pro = clean_pro(pro)[0]
     outbounds, endpoints = engines.to_singbox(outs, xray_ports)
     tags = [o["tag"] for o in outs]
-    proxy_out = {"type": "selector", "tag": "proxy", "outbounds": tags, "default": chosen if chosen in tags else tags[0]}
-    if chosen == "AUTO" and len(tags) > 1:
-        proxy_out = {"type": "urltest", "tag": "proxy", "outbounds": [t for t in (auto_tags or tags) if t in tags] or tags,
-                     "url": pro["auto_url"], "interval": f"{pro['auto_interval']}m", "tolerance": pro["auto_tolerance"]}
+    # Every route ends in the "proxy" selector. A server is chosen, or changed while the connection is up, by telling the
+    # selector (the core's local API), never by restarting the core: the tunnel stays, so not a packet can leave around it
+    # while the server changes, and a server that does not answer means no traffic, not a direct one.
+    # The "pick the best by itself" mode is a member of the selector too: the core's own urltest group.
+    members, groups = list(tags), []
+    if len(tags) > 1:
+        groups.append({"type": "urltest", "tag": AUTO_TAG, "outbounds": [t for t in (auto_tags or tags) if t in tags] or tags,
+                       "url": pro["auto_url"], "interval": f"{pro['auto_interval']}m", "tolerance": pro["auto_tolerance"]})
+        members.append(AUTO_TAG)
+    proxy_out = {"type": "selector", "tag": "proxy", "outbounds": members, "default": selector_default(tags, chosen),
+                 "interrupt_exist_connections": True}
     domains = list(extra_direct)
     rules = [
         {"action": "sniff"},
@@ -666,7 +688,7 @@ def build_config(outs, chosen, ru_direct, extra_direct, api=None, auto_tags=None
                  **({} if IS_MAC else {"interface_name": TUN_NAME})),  # macOS names must be utunN: let the core pick
             {"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": mixed_port or pro["mixed_port"]},
         ],
-        "outbounds": outbounds + [proxy_out, {"type": "direct", "tag": "direct"}],
+        "outbounds": outbounds + groups + [proxy_out, {"type": "direct", "tag": "direct"}],
         "route": {"rules": rules, "rule_set": rule_sets, "final": "direct" if only else "proxy", "auto_detect_interface": True,
                   "default_domain_resolver": "local"},
     }
@@ -1041,6 +1063,8 @@ PRO_LAYOUT = (
         ("dns_local", T("DNS для сайтов своей страны"), "entry", T("Работает мимо VPN, когда включено «Сайты страны напрямую». Пусто: DNS выбранной страны, а где его нет, DNS системы.")),
     )),
     (T("Быстрейший из списка"), (
+        ("auto_focus", T("Что важнее при выборе сервера"), "choice", T("Отклик: звонки, игры, сайты, мессенджеры. Скорость: видео и загрузки. Поровну: и то и другое, хороший вариант на каждый день.")),
+        ("auto_speed", T("Учитывать скорость, а не только отклик"), "check", T("Сразу после подключения программа мерит скорость у лучших по отклику серверов (несколько секунд, десятки мегабайт) и повторяет раз в полчаса.")),
         ("auto_url", T("Адрес для проверки отклика"), "entry", None),
         ("auto_interval", T("Проверять каждые, минут"), "entry", None),
         ("auto_tolerance", T("Менять сервер, если другой лучше на, мс"), "entry", T("Больше число: реже переключений.")),
@@ -1224,6 +1248,8 @@ class ProWindow(tk.Toplevel):
         for k, var in self.vars.items():
             var.set(clean[k] if isinstance(var, tk.BooleanVar) else str(clean[k]))
         self.app.apply_live()
+        self.app.sort_rows()  # the order of the list follows what the auto mode is told to care about
+        self.app.apply_smart()
         note = T("Сохранено.")
         if self.app.state != "off":
             note += T(" Настройки соединения заработают при следующем подключении.")
@@ -1990,16 +2016,73 @@ def free_port():
     return port
 
 
-def current_server(api):
-    """Tag of the server the 'proxy' group uses right now (in auto mode: the urltest pick), asked from the
-    core's local API. `api` = (port, secret). Returns None when the core does not answer."""
+def core_api(api, method, path, body=None, timeout=3):
+    """One call to the core's local API (`api` = (port, secret), loopback only): (HTTP status, answer as a dict).
+    Status 0 when the core does not answer at all."""
     port, secret = api
-    req = urllib.request.Request(f"http://127.0.0.1:{port}/proxies/proxy", headers={"Authorization": f"Bearer {secret}"})
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method=method,
+                                 headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/json"})
     try:
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=3) as r:
-            return json.load(r).get("now") or None
-    except Exception:
-        return None
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout) as r:
+            raw = r.read()
+            status = r.status
+    except urllib.error.HTTPError as e:
+        status, raw = e.code, e.read()
+    except Exception:  # noqa: BLE001
+        return 0, {}
+    try:
+        got = json.loads(raw) if raw else {}
+    except ValueError:
+        got = {}
+    return status, got if isinstance(got, dict) else {}
+
+
+def current_server(api, raw=False):
+    """Tag of the server the 'proxy' selector is on right now, asked from the core's local API. When it is on the "pick the
+    best" group, the server that group picked (`raw=True`: the group's own tag). None when the core does not answer."""
+    status, got = core_api(api, "GET", "/proxies/proxy")
+    now = got.get("now") or None if status == 200 else None
+    if now == AUTO_TAG and not raw:
+        status, got = core_api(api, "GET", "/proxies/" + urllib.parse.quote(AUTO_TAG, safe=""))
+        now = got.get("now") or None if status == 200 else None
+    return now
+
+
+def close_via(api, tag):
+    """Close the connections that go through server `tag` (the applications open new ones, which take the new server).
+    How many were closed. The selector's own option does not reach the connections of a proxy request, so this does."""
+    status, got = core_api(api, "GET", "/connections", timeout=4)
+    if status != 200:
+        return 0
+    n = 0
+    for c in got.get("connections") or []:
+        if isinstance(c, dict) and tag in (c.get("chains") or []) and c.get("id"):
+            if core_api(api, "DELETE", "/connections/" + urllib.parse.quote(str(c["id"]), safe=""), timeout=3)[0] in (200, 204):
+                n += 1
+    return n
+
+
+def switch_server(api, tag, interrupt=True):
+    """Move the running core to another server (or to AUTO_TAG) without restarting it: the tunnel stays up, so nothing
+    leaves around it. With `interrupt`, connections open on the server being left are closed, so the whole connection
+    is on the new server at once. (True, "") or (False, why)."""
+    old = current_server(api) if interrupt else None
+    status, got = core_api(api, "PUT", "/proxies/proxy", {"name": tag}, timeout=5)
+    if status not in (200, 204):
+        return False, T("ядро не отвечает") if status == 0 else str(got.get("message") or status)
+    if old and current_server(api) != old:
+        close_via(api, old)
+    return True, ""
+
+
+def server_delay(api, tag, url, timeout_ms=4000):
+    """The core's own check of a server: how long it takes to reach `url` through it, in ms, None if it does not answer.
+    Done by the running core, with its own sockets, so the tunnel is not involved and nothing is switched."""
+    path = f"/proxies/{urllib.parse.quote(tag, safe='')}/delay?url={urllib.parse.quote(url, safe='')}&timeout={int(timeout_ms)}"
+    status, got = core_api(api, "GET", path, timeout=timeout_ms / 1000 + 3)
+    d = got.get("delay")
+    return d if status == 200 and isinstance(d, (int, float)) and d > 0 else None
 
 
 def resolve_servers(outs):
@@ -2189,6 +2272,18 @@ class App(tk.Tk):
         self.api = None  # (port, secret) of the running core's local API
         self.current = ""  # server the core is using right now
         self.polling = False
+        self.core_tags = set()  # the servers the running core was started with: only these can be switched to without a reconnect
+        self.core_sel = ""  # what the core's selector was last told: a server, or AUTO_TAG
+        self.smart_tag = None  # in «Быстрейший из списка»: the server the app itself picked by ping and speed (None: the core's group decides)
+        self.switching = False  # a change of server is under way (off the UI thread)
+        self.switch_again = False  # ... and the user chose again meanwhile
+        self.switch_timer = None  # waits for the user to stop moving through the list before switching
+        self.test_quick = False  # the running test is the background one of the auto mode, not the user's
+        self.test_thread = None
+        self.speed_time = {}  # tag -> when its speed was last measured
+        self.skip_auto = {}  # tag -> until when the auto mode keeps away from it (it stopped answering)
+        self.bad_checks = 0  # answers in a row that the server of the smart pick did not give
+        self.t_t = 0.0  # when the connection last became ready
         self.t_conn = 0.0  # when the last connect started
         self.uiq = queue.Queue()  # callables from worker threads, run by pump() on the Tk thread
         self.flagimgs = FlagImages(self)
@@ -3093,20 +3188,26 @@ class App(tk.Tk):
         self.save(sources=False)
 
     # ----- speed test -----
-    def run_test(self):
+    def run_test(self, quick=False):
+        """The user's test (the button), or with `quick` the background one of «Быстрейший из списка»: ping of every server and a
+        short speed run of the best few, which is what the choice by ping and speed goes by."""
         if self.testing:
+            if quick:
+                return
             self.test_stop.set()
             return self.test_btn.config(text=T("Останавливаю…"))
         if not self.outs:
             return self.say(T("Сначала добавь подписку и нажми «Обновить»."), err=True)
-        plan = (self.v_flags.get(), self.v_ping.get(), self.v_speed.get())
+        plan = (False, True, True) if quick else (self.v_flags.get(), self.v_ping.get(), self.v_speed.get())
         if not any(plan):
             return self.say(T("В настройках выключено всё: флаги, пинг и скорость. Включи то, что нужно измерить."), err=True)
         self.testing = True
+        self.test_quick = quick
         self.test_stop.clear()
         self.test_btn.config(text=T("Остановить"))
-        self.say("")
-        threading.Thread(target=self._test_worker, args=(list(self.outs), plan), daemon=True).start()
+        self.say(T("Подбираю лучший сервер: проверяю отклик и скорость…") if quick else "")
+        self.test_thread = threading.Thread(target=self._test_worker, args=(list(self.outs), plan, quick), daemon=True)
+        self.test_thread.start()
 
     def _ui(self, fn):
         """Hand fn to the Tk thread. Worker threads must never call Tk themselves."""
@@ -3129,7 +3230,161 @@ class App(tk.Tk):
         if sel and sel[0] != self._pick:
             self._pick = sel[0]
             self.cfg["chosen"] = self.chosen()
+            self.want_switch()
         self.refresh_power()
+
+    # ----- changing the server of a running connection -----
+    # The core is never restarted for this: the "proxy" selector is told, so the tunnel stays up, nothing leaves around it
+    # and the connection is on the new server at once. A server that does not answer means no traffic, not a direct one.
+    def want_switch(self):
+        """The user picked another row while the connection is up (or coming up): move the core, a moment after the last
+        click so that going through the list with the arrow keys does not switch at every row."""
+        if self.state == "off":
+            return
+        if self.switch_timer:
+            self.after_cancel(self.switch_timer)
+        self.switch_timer = self.after(350, self.apply_choice)
+
+    def switch_target(self):
+        """What the selector should be on for what the list says: the server, or in «Быстрейший из списка» the server the
+        app picked by ping and speed, else the core's own group."""
+        want = self.chosen()
+        if want == "AUTO":
+            return self.smart_tag if self.smart_tag in self.core_tags else AUTO_TAG
+        return want
+
+    def apply_choice(self):
+        self.switch_timer = None
+        if self.state != "on" or not self.api:  # still connecting: got_current() comes back here once the core is up
+            return
+        if self.chosen() != "AUTO":
+            self.smart_tag = None
+        target = self.switch_target()
+        if target != AUTO_TAG and target not in self.core_tags:
+            where = flags.strip_flag(self.current) if self.current else ""
+            return self.say(T("Этого сервера не было в списке при подключении. Отключись и подключись снова, тогда им можно будет "
+                            "пользоваться. Пока всё идёт через «{0}».").format(where), err=True)
+        if target == self.core_sel:
+            return
+        if self.switching:
+            self.switch_again = True
+            return
+        self.switching = True
+        api, url = self.api, self.pro()["auto_url"]
+        self.say(T("Переключаюсь на «{0}»…").format(AUTO_LABEL if target == AUTO_TAG else flags.strip_flag(target)))
+
+        def work():
+            ok, why = switch_server(api, target)
+            now = current_server(api) if ok else None
+            ms = server_delay(api, now, url, 5000) if now else None  # the core's own check: is it answering?
+            self._ui(lambda: self.switched(api, target, ok, why, now, ms))
+        threading.Thread(target=work, daemon=True).start()
+
+    def switched(self, api, target, ok, why, now, ms):
+        self.switching = False
+        if api != self.api or self.state == "off":  # the connection ended meanwhile
+            return
+        if ok:
+            self.core_sel = target
+            if now:
+                self.current = now
+                self.mark_live(now)
+            self.refresh_power()
+            name = flags.strip_flag(now or target)
+            if now and ms is None:
+                self.say(T("Сервер «{0}» не отвечает. Через него трафик не идёт, мимо VPN ничего не уходит. Выбери другой сервер.").format(name), err=True)
+            elif ms and self.chosen() == "AUTO":
+                sp = self.results.get(now or target, (None, None))[1]
+                self.say(T("Автовыбор: «{0}», отклик {1:.0f} мс").format(name, ms) + (", " + fmt_speed(sp) if choice.usable(sp) else "") + ".")
+            elif ms:
+                self.say(T("Теперь «{0}», отклик {1:.0f} мс.").format(name, ms))
+            else:
+                self.say(T("Теперь «{0}».").format(name))
+        else:
+            self.say(T("Не получилось переключить сервер ({0}). Соединение осталось на прежнем.").format(why), err=True)
+        if self.switch_again:
+            self.switch_again = False
+            self.apply_choice()
+
+    # ----- «Быстрейший из списка»: ping and speed together -----
+    # The lowest ping can sit on a thin pipe: fine for a message, bad for a video. The core's own group goes by ping alone, so
+    # the app measures speed too (a few seconds, the best few servers, now and then), weighs both (choice.py) and puts the
+    # connection on the result. Until there are numbers, and whenever speed is switched off, the core's group does the choice.
+    def use_speed(self):
+        """Does the auto mode weigh speed? Only when the advanced settings allow it and ping and speed are switched on."""
+        return bool(self.pro()["auto_speed"]) and bool(self.v_speed.get()) and bool(self.v_ping.get())
+
+    def auto_candidates(self):
+        """{tag: (ping, speed)} of the servers the auto mode may be on, from the measurements (those that stopped answering
+        a moment ago, and those the core does not have, are left out)."""
+        now = time.time()
+        res = {}
+        for tag in set(self.auto_pool()) & self.core_tags:
+            if self.skip_auto.get(tag, 0) > now or self.alive.get(tag) is False:
+                continue
+            p, s = self.results.get(tag, (None, None))
+            if choice.usable(p):
+                res[tag] = (p, s if choice.usable(s) else None)
+        return res
+
+    def smart_pick(self):
+        """The server the auto mode should be on, or None when the numbers say nothing (the core's group goes on)."""
+        if not self.use_speed():
+            return None
+        res = self.auto_candidates()
+        if not any(choice.usable(s) for _, s in res.values()):
+            return None
+        stay = self.smart_tag or (self.current if self.current in res else None)
+        return choice.best(res, self.pro()["auto_focus"], current=stay)
+
+    def apply_smart(self):
+        """Connected in the auto mode: put the connection on the server the numbers favour (only for a clear gain)."""
+        if self.state != "on" or not self.api or self.chosen() != "AUTO" or len(self.core_tags) < 2:
+            return
+        tag = self.smart_pick()
+        if tag is None or tag == self.smart_tag:
+            return
+        self.smart_tag = tag
+        self.apply_choice()
+
+    def review_auto(self):
+        """Connected in the auto mode: if the speeds are not fresh, measure them (the background test), then pick."""
+        if self.state != "on" or not self.api or self.chosen() != "AUTO" or len(self.core_tags) < 2 or self.testing:
+            return
+        if self.use_speed() and not self.loading:
+            pool = [t for t in self.auto_pool() if t in self.core_tags]
+            fresh = sum(1 for t in pool if time.time() - self.speed_time.get(t, 0) < REVIEW_EVERY)
+            if fresh < min(3, len(pool)):
+                return self.run_test(quick=True)
+        self.apply_smart()
+
+    def health_check(self):
+        """On the server the app picked: is it still answering? Asked of the core, not the tunnel, every few seconds."""
+        if (self.state != "on" or not self.api or self.smart_tag is None or self.chosen() != "AUTO" or self.switching
+                or self.testing):
+            return
+        api, tag, url = self.api, self.smart_tag, self.pro()["auto_url"]
+
+        def work():
+            ms = server_delay(api, tag, url, 4000)
+            self._ui(lambda: self.health_done(api, tag, ms))
+        threading.Thread(target=work, daemon=True).start()
+
+    def health_done(self, api, tag, ms):
+        if api != self.api or tag != self.smart_tag or self.state != "on":
+            return
+        if ms is not None:
+            self.bad_checks = 0
+            return
+        self.bad_checks += 1
+        if self.bad_checks < 2:  # one lost answer is not yet a dead server
+            return
+        self.bad_checks = 0
+        self.skip_auto[tag] = time.time() + 600
+        self.say(T("Сервер «{0}» перестал отвечать, перехожу на другой.").format(flags.strip_flag(tag)), err=True)
+        self.smart_tag = None
+        self.smart_tag = self.smart_pick()  # the next best; None: the core's own group takes over
+        self.apply_choice()
 
     def select(self, iid):
         self._pick = iid
@@ -3172,8 +3427,9 @@ class App(tk.Tk):
         self.set_exit(i, cc)
         self.count.config(text=f"{T('Пинг') if ping_on else T('Проверка')} {done}/{total}")
 
-    def _probe_all(self, outs, plan):
-        """The measuring itself (the core is already running): servers in parallel, then the speed of the best ones."""
+    def _probe_all(self, outs, plan, quick=False):
+        """The measuring itself (the core is already running): servers in parallel, then the speed of the best ones.
+        `quick` (the background one): fewer servers, a few seconds each, and only those the auto mode may use."""
         _, ping_on, speed_on = plan
         n = len(outs)
         alive_i, pings, done = {}, {}, 0
@@ -3191,17 +3447,20 @@ class App(tk.Tk):
                 self._ui(lambda i=i, ms=ms, cc=cc, alive=alive, d=done: self.probed(i, ms, cc, alive, plan, d, n))
         if not speed_on or self.test_stop.is_set():
             return
+        pool = set(self.auto_pool()) if quick else None
+        usable_i = [i for i, ok in alive_i.items() if ok and (pool is None or outs[i]["tag"] in pool)]
         if ping_on:  # the fastest by response time are the likeliest to be fast
-            top = sorted((i for i, ok in alive_i.items() if ok), key=lambda i: pings[i])[:pro["test_top"]]
+            top = sorted(usable_i, key=lambda i: pings[i])[:min(pro["test_top"], QUICK_TOP) if quick else pro["test_top"]]
         else:  # no ranking without ping: every server that answered
-            top = sorted(i for i, ok in alive_i.items() if ok)
+            top = sorted(usable_i)
+        secs = min(pro["test_secs"], QUICK_SECS) if quick else pro["test_secs"]
         urls = list(SPEED_URLS)  # one source for the whole run so servers are compared on equal terms
         self.speed_host = ""
         for k, i in enumerate(top, 1):
             if self.test_stop.is_set():
                 break
             self._ui(lambda k=k, t=len(top): self.count.config(text=T("Скорость {0}/{1}").format(k, t)))
-            sp, used = probe_speed(TEST_BASE_PORT + i, secs=pro["test_secs"], urls=urls)
+            sp, used = probe_speed(TEST_BASE_PORT + i, secs=secs, urls=urls)
             if used:
                 urls.remove(used)
                 urls.insert(0, used)
@@ -3216,12 +3475,14 @@ class App(tk.Tk):
             return
         p, s = self.results.get(tag, (None, None))
         self.results[tag] = (ping if ping is not None else p, speed if speed is not None else s)
+        if choice.usable(speed):
+            self.speed_time[tag] = time.time()
         p, s = self.results[tag]
         if self.tree.exists(str(i)):
             self.tree.set(str(i), "ping", fmt_ping(p))
             self.tree.set(str(i), "speed", fmt_speed(s))
 
-    def _test_worker(self, outs, plan=(True, True, True)):
+    def _test_worker(self, outs, plan=(True, True, True), quick=False):
         err = None
         try:
             # Always measure around any tunnel (ours, a leftover core, Karing...), not through it: sockets are bound
@@ -3265,7 +3526,7 @@ class App(tk.Tk):
                         raise RuntimeError(T("проверка не ответила (возможно, мешает антивирус)"))
                     time.sleep(0.2)
 
-            self._probe_all(outs, plan)
+            self._probe_all(outs, plan, quick)
         except Exception as e:
             err = str(e)
         finally:
@@ -3282,10 +3543,13 @@ class App(tk.Tk):
             self._ui(lambda: self.test_done(err))
 
     def test_done(self, err):
+        quick, self.test_quick = self.test_quick, False
         self.testing = False
         self.test_btn.config(text=self.test_label())
         self.count.config(text=str(len(self.outs)))
         if err:
+            if quick:
+                return self.say(T("Не получилось проверить серверы для автовыбора, он остался на прежнем. Попробую позже."), err=True)
             return self.say(T("Проверка не получилась: ") + err + T(". Проверь интернет и попробуй ещё раз."), err=True)
         show_flags, show_ping, show_speed = self.v_flags.get(), self.v_ping.get(), self.v_speed.get()
 
@@ -3306,20 +3570,27 @@ class App(tk.Tk):
         # The test only reorders rows and reports. It never changes what the user picked: with «Быстрейший из списка»
         # selected, connecting must still switch servers by itself, not pin the connection to one of them.
         self.sort_rows()
-        self.tree.yview_moveto(0)
+        if not quick:  # a test in the background must not move the list under the user's hand
+            self.tree.yview_moveto(0)
         try:
             write_json(EXITFILE, self.exit_cc)
         except OSError:
             pass
         src = note = hint = ""
         if with_speed:
-            best = max(with_speed, key=lambda i: res(i)[1])
+            best = self.best_row(alive)  # ping and speed together: the lowest ping with a thin pipe is not the best choice
+            if best is None:
+                best = max(with_speed, key=lambda i: res(i)[1])
             p, sp = res(best)
             what = fmt_speed(sp) + (f", {fmt_ping(p)}" if show_ping and p is not None and p >= 0 else "")
             skipped = sum(1 for i in alive if res(i)[1] is not None and res(i)[1] < 0)
             if skipped:
                 what += T("; у {0} серверов скорость не замерилась").format(skipped)
-            head = T("Самый быстрый: {0} ({1}).").format(flags.strip_flag(self.outs[best]['tag']), what)
+            head = T("Лучший выбор: {0} ({1}).").format(flags.strip_flag(self.outs[best]['tag']), what)
+            quick_ping = min(with_ping, key=lambda i: res(i)[0]) if with_ping else None
+            if quick_ping is not None and quick_ping != best and choice.usable(res(quick_ping)[1]):
+                head += T(" Отклик ниже у «{0}» ({1}), но скорость там {2}.").format(
+                    flags.strip_flag(self.outs[quick_ping]["tag"]), fmt_ping(res(quick_ping)[0]), fmt_speed(res(quick_ping)[1]))
             src = T(" Скорость измерена загрузкой с {0}.").format(self.speed_host) if getattr(self, "speed_host", "") else ""
         elif with_ping:
             best = min(with_ping, key=lambda i: res(i)[0])
@@ -3333,11 +3604,27 @@ class App(tk.Tk):
             if wrong:
                 note = T(" У {0} серверов страна в названии не совпала с реальным выходом: флаг показан по выходу.").format(wrong)
         if best is not None and self.tree.selection() and self.tree.selection()[0] == "auto":
-            hint = (T("«Быстрейший из списка» сам выберет лучший по отклику и будет переключаться. "
+            hint = (T("«Быстрейший из списка» выбирает по отклику и скорости вместе и сам переключается, если сервер стал хуже. "
                     "Чтобы подключаться только к одному серверу, выбери его в списке."))
         if passed:
             hint += T(" Серые серверы (выход в {0}) «Быстрейший из списка» не берёт: через них блокировки не обойти.").format(regions.name(self.home_cc) or self.home_cc)
-        self.say(f"{head}{src}{note} {hint}".strip())
+        if quick:
+            self.say("")  # the background test says only what it did with the connection (apply_smart)
+        else:
+            self.say(f"{head}{src}{note} {hint}".strip())
+        self.apply_smart()  # connected in the auto mode: go to what the numbers say
+
+    def best_row(self, rows):
+        """Index of the best server among `rows` by ping and speed together (what is shown counts), None if nothing to go by."""
+        show_ping, show_speed = self.v_ping.get(), self.v_speed.get()
+        cands = {}
+        for i in rows:
+            p, sp = self.results.get(self.outs[i]["tag"], (None, None))
+            if show_ping and not choice.usable(p):
+                continue
+            cands[str(i)] = (p if show_ping else 0.0, sp if show_speed else None)
+        top = choice.best(cands, self.pro()["auto_focus"])
+        return int(top) if top is not None else None
 
     def is_pinned(self, i):
         return okey(self.outs[i]) in self.cfg["pins"]
@@ -3391,13 +3678,18 @@ class App(tk.Tk):
             self.toggle()
 
     def sort_rows(self):
-        """Measured speed (desc), then ping (asc); only what is switched on counts. Servers that did not answer and
-        untested ones go last; "auto" stays on top."""
+        """Pinned first, then by the score of ping and speed together (choice.py); only what is switched on counts. Servers
+        that did not answer and untested ones go last; "auto" stays on top."""
+        focus, show_ping, show_speed = self.pro()["auto_focus"], self.v_ping.get(), self.v_speed.get()
+        assumed = choice.assumed_speed({t: (p, sp if show_speed else None) for t, (p, sp) in self.results.items()})
+
         def key(i):
             p, sp = self.results.get(self.outs[i]["tag"], (None, None))
-            fast = self.v_speed.get() and sp is not None and sp >= 0
-            usep = self.v_ping.get() and p is not None and p >= 0
-            return (not self.is_pinned(i), not self.is_alive(i), not fast, -(sp if fast else 0), p if usep else 0)
+            fast = show_speed and choice.usable(sp)
+            usep = show_ping and choice.usable(p)
+            # the order of the list is the order of advice: ping and speed together, as «Быстрейший из списка» weighs them
+            score = choice.score(p if usep else 0.0, sp if fast else None, focus, assumed if show_speed else None) if (usep or fast) else 0.0
+            return (not self.is_pinned(i), not self.is_alive(i), not (usep or fast), -score, p if usep else 0)
         start = 1 if self.tree.exists("auto") else 0
         for pos, i in enumerate(sorted(range(len(self.outs)), key=key)):
             self.tree.move(str(i), "", pos + start)
@@ -3412,8 +3704,13 @@ class App(tk.Tk):
                                     "на значок правой кнопкой и выбери «Запуск от имени администратора»."))
         if not self.outs:
             return self.say(T("Сначала добавь подписку и нажми «Обновить»."), err=True)
-        if self.testing:
+        if self.testing and not self.test_quick:
             return self.say(T("Идёт тест скорости. Дождись конца или остановь его."), err=True)
+        if self.testing:  # the background test of the auto mode of the connection that has just been closed: it ends at once
+            self.test_stop.set()
+            if self.test_thread:
+                self.test_thread.join(8)
+            self.testing = self.test_quick = False
         self.clean_done.wait(8)  # leftover cores from a previous run are being closed
         self.save()
         if karing_running() and not ask_yes_no(self, T("Запущен другой VPN-клиент (Karing / v2rayN / Hiddify / NekoRay).\n"
@@ -3519,6 +3816,8 @@ class App(tk.Tk):
             write()
             ok, msg = core_check(RUNCFG)
         self.mixed_active = mixed
+        self.core_tags = {o["tag"] for o in outs}  # what this core can be switched between while it runs
+        self.core_sel = selector_default([o["tag"] for o in outs], chosen)
         if not ok:
             self.stop_xray()
         return ok, msg, " ".join(notes)
@@ -3680,6 +3979,14 @@ class App(tk.Tk):
         self.active = ""
         self.current = ""
         self.api = None
+        self.core_tags, self.core_sel, self.smart_tag = set(), "", None
+        self.switching = self.switch_again = False
+        self.skip_auto, self.bad_checks = {}, 0
+        if self.switch_timer:
+            self.after_cancel(self.switch_timer)
+            self.switch_timer = None
+        if self.testing and self.test_quick:  # the background test of the auto mode is of no use without a connection
+            self.test_stop.set()
         self.mark_live("")
         self.refresh_power()
 
@@ -3709,6 +4016,9 @@ class App(tk.Tk):
             self.t0 = time.time()
             self.say("")
             self.refresh_power()
+            if self.switch_target() != self.core_sel:  # something else was picked while it was connecting
+                self.want_switch()
+            self.after(3000, self.review_auto)  # (auto mode only) measure what the choice by ping and speed goes by
         if now != self.current:
             self.current = now
             self.mark_live(now)
@@ -3741,6 +4051,10 @@ class App(tk.Tk):
                 self.t0 = time.time()
                 self.say("")
                 self.refresh_power()
+        if self.n % 30 == 0:  # every 15 seconds: is the server the auto mode picked still answering?
+            self.health_check()
+        if self.n % 3600 == 0:  # every half hour: are the numbers the auto mode goes by still fresh?
+            self.review_auto()
         if self.n % 120 == 0:  # every minute
             if trim_logs():
                 self._pos = 0

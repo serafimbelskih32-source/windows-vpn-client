@@ -350,8 +350,9 @@ app3 = vpn.App()
 app3.withdraw()
 pump(app3, lambda: len(app3.outs) >= 5, 10)
 for i, o in enumerate(app3.outs):
-    app3.results[o["tag"]] = (50 + i * 10, 10.0 + i)  # the LAST server is the fastest by speed
+    app3.results[o["tag"]] = (60.0, 10.0)
 fastest = len(app3.outs) - 1
+app3.results[app3.outs[fastest]["tag"]] = (70.0, 150.0)  # the LAST server is the best: a little more ping, far more speed
 app3.tree.selection_set("auto")
 app3.update()
 app3.test_done(None)
@@ -361,7 +362,7 @@ check("AUTO stays selected after the test", app3.tree.selection() == ("auto",) a
 check("saved choice is still AUTO", app3.cfg["chosen"] == "AUTO", app3.cfg["chosen"])
 check("fastest server is the first row after AUTO", app3.tree.get_children()[1] == str(fastest), app3.tree.get_children()[:3])
 check("status names the fastest and explains AUTO", app3.outs[fastest]["tag"] in app3.status.cget("text")
-      and "переключаться" in app3.status.cget("text"), app3.status.cget("text"))
+      and "переключается" in app3.status.cget("text"), app3.status.cget("text"))
 app3.tree.selection_set("1")
 app3.update()
 app3.test_done(None)
@@ -625,7 +626,7 @@ app6.v_speed.set(True)
 app6.v_ping.set(False)
 app6.test_done(None)
 txt = app6.status.cget("text")
-check("speed on, ping off: ranks by speed and does not quote a ping", txt.startswith("Самый быстрый:") and "мс" not in txt.split(")")[0], txt)
+check("speed on, ping off: ranks by speed and does not quote a ping", txt.startswith("Лучший выбор:") and "мс" not in txt.split(")")[0], txt)
 app6.v_ping.set(True)
 app6.v_speed.set(False)
 app6.results.clear()
@@ -812,7 +813,7 @@ check("outside Russia a Russian server is as good as any: not passed over",
 check("... and its row is not muted", not app10.tree.item("0", "tags"))
 app10.set_home("RU")
 cfg = vpn.build_config(app10.outs, "AUTO", True, [], None, app10.auto_pool())
-grp = next(o for o in cfg["outbounds"] if o.get("tag") == "proxy")
+grp = next(o for o in cfg["outbounds"] if o.get("tag") == vpn.AUTO_TAG)
 check("the core's auto group holds only the servers auto may use",
       grp["type"] == "urltest" and grp["outbounds"] == all_tags[1:], grp)
 cfg = vpn.build_config(app10.outs, "🇷🇺 Россия", True, [], None, app10.auto_pool())
@@ -821,7 +822,7 @@ check("picked by hand, a Russian server is still available", grp["type"] == "sel
       and "🇷🇺 Россия" in grp["outbounds"], grp)
 cfg = vpn.build_config(app10.outs, "AUTO", True, [])
 check("without a narrowed list the auto group is every server",
-      next(o for o in cfg["outbounds"] if o.get("tag") == "proxy")["outbounds"] == all_tags)
+      next(o for o in cfg["outbounds"] if o.get("tag") == vpn.AUTO_TAG)["outbounds"] == all_tags)
 calls = []
 real = (vpn.probe_ping, vpn.probe_exit)
 vpn.probe_ping = lambda port: 50.0
@@ -854,7 +855,7 @@ check("... and a ping-only test does not ask for the exit country", calls == [])
 vpn.probe_ping, vpn.probe_exit = real
 cfg = vpn.build_config(app10.outs, "AUTO", True, [], None, app10.auto_pool())
 check("... the core's auto group is every server again",
-      next(o for o in cfg["outbounds"] if o.get("tag") == "proxy")["outbounds"] == all_tags)
+      next(o for o in cfg["outbounds"] if o.get("tag") == vpn.AUTO_TAG)["outbounds"] == all_tags)
 app10.v_skip.set(True)
 # installing an update: once, and the window closes cleanly
 real_apply = vpn.updater.apply_staged
@@ -1133,12 +1134,12 @@ check("the default config is the old one (stack, strict route, port, dns, log, a
       tun["stack"] == "mixed" and tun["strict_route"] is True and next(i for i in old_style["inbounds"] if i["type"] == "mixed")["listen_port"] == 2080
       and old_style["log"]["level"] == "info" and old_style["dns"]["servers"][0]["server"] == "1.1.1.1"
       and old_style["dns"]["servers"][1]["server"] == "77.88.8.8"
-      and next(o for o in old_style["outbounds"] if o.get("tag") == "proxy")["interval"] == "3m")
+      and next(o for o in old_style["outbounds"] if o.get("tag") == vpn.AUTO_TAG)["interval"] == "3m")
 custom = vpn.build_config(app13.outs, "AUTO", True, [], None, None, None,
                           {"mixed_port": 3128, "tun_stack": "gvisor", "strict_route": False, "log_level": "warn",
                            "dns_remote": "dns.google", "dns_local": "8.8.8.8", "auto_url": "https://x.example/204",
                            "auto_interval": 7, "auto_tolerance": 120})
-grp = next(o for o in custom["outbounds"] if o.get("tag") == "proxy")
+grp = next(o for o in custom["outbounds"] if o.get("tag") == vpn.AUTO_TAG)
 check("advanced settings reach the config",
       next(i for i in custom["inbounds"] if i["type"] == "tun")["stack"] == "gvisor"
       and next(i for i in custom["inbounds"] if i["type"] == "tun")["strict_route"] is False
