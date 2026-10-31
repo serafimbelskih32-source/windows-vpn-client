@@ -166,6 +166,7 @@ finally:
 
 # ---------- the window: pins, traffic line, login switch ----------
 vpn.autostart_command = lambda: ["FimaVPN.exe", "--autostart"]
+json.dump({"region": "RU", "lang": "ru", "setup_done": True}, open(vpn.SETTINGS, "w", encoding="utf-8"))  # not a new installation: no welcome dialog
 app = vpn.App()
 try:
     def settle(n=8):
